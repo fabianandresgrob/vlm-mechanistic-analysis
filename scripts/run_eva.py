@@ -44,7 +44,7 @@ def load_vqav2_samples(n_samples: int) -> list[dict]:
     from datasets import load_dataset
 
     logger.info("Loading VQAv2 validation split (n=%d)…", n_samples)
-    ds = load_dataset("HuggingFaceM4/VQAv2", split="validation", streaming=False)
+    ds = load_dataset("lmms-lab/VQAv2", split="validation", streaming=False)
     samples = []
     for item in ds.select(range(min(n_samples, len(ds)))):
         samples.append(
@@ -167,9 +167,8 @@ def main():
     )
     parser.add_argument(
         "--vab_dataset_id",
-        default=None,
-        help="HuggingFace dataset ID for VLMs Are Biased (e.g. 'MMInstruction/VLMsBiased'). "
-             "Dataset must already be in HF_DATASETS_CACHE. Required if --dataset vlms_are_biased.",
+        default="anvo25/vlms-are-biased",
+        help="HuggingFace dataset ID for VLMs Are Biased (default: anvo25/vlms-are-biased).",
     )
     parser.add_argument(
         "--vab_split",
@@ -187,11 +186,6 @@ def main():
     if args.dataset == "vqav2":
         samples = load_vqav2_samples(args.n_samples)
     elif args.dataset == "vlms_are_biased":
-        if not args.vab_dataset_id:
-            parser.error(
-                "--vab_dataset_id is required for --dataset vlms_are_biased. "
-                "Check the HF dataset ID used during lmms-eval (look in HF_DATASETS_CACHE)."
-            )
         samples = load_vlms_are_biased_samples(
             args.vab_dataset_id, args.n_samples, split=args.vab_split
         )
