@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vlm-mechanistic-analysis"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    # Core ML
+    "torch>=2.3.0",
+    "torchvision>=0.18.0",
+    "transformers>=4.49.0",      # Gemma 3 + SigLIP support
+    "accelerate>=0.34.0",
+    "bitsandbytes>=0.43.0",      # quantization for large models
+    # SAE
+    "sae-lens>=4.0.0",           # GemmaScope SAE loading
+    # Data
+    "datasets>=2.20.0",
+    "huggingface_hub>=0.24.0",
+    "Pillow>=10.3.0",
+    # Numerics + ML utils
+    "numpy>=1.26.0",
+    "scipy>=1.13.0",
+    "scikit-learn>=1.5.0",
+    "einops>=0.8.0",
+    # Visualisation
+    "matplotlib>=3.9.0",
+    "seaborn>=0.13.2",
+    # Utilities
+    "tqdm>=4.66.0",
+    "pyyaml>=6.0",
+    "jsonlines>=4.0.0",
+    "psutil>=5.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ipykernel",
+    "ipywidgets",
+    "jupyter",
+]
+# InternVL is not on PyPI — install from source:
+#   pip install git+https://github.com/OpenGVLab/InternVL.git
+# (only needed for Exp 2.4 scaling analysis)
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "chain_of_embedding",
+    "eva",
+    "vti",
+    "sae_convergence",
+    "feature_search",
+    "scripts",
+    "analysis",
+]
+
+[tool.hatch.metadata]
+allow-direct-references = true

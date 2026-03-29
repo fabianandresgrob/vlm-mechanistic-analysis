@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+
+# Results and data (large files)
+results/
+checkpoints/
+activations/
+*.pt
+*.pth
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Dev/AI assistant files — not for public repo
+CLAUDE.md
+PLAN.md
+docs/superpowers/
