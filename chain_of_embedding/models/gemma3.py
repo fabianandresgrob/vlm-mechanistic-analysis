@@ -52,13 +52,32 @@ def num_llm_layers(model: Gemma3ForConditionalGeneration) -> int:
 
 
 def get_lm_head(model: Gemma3ForConditionalGeneration):
-    """Return the language model head (unembedding matrix)."""
-    return model.language_model.lm_head
+    """Return the language model head (unembedding matrix).
+
+    Gemma3ForConditionalGeneration exposes lm_head directly (unlike PaliGemma
+    which wraps it under .language_model).
+    """
+    if hasattr(model, "lm_head"):
+        return model.lm_head
+    # Fallback for any wrapper variants
+    return model.get_output_embeddings()
 
 
 def get_final_norm(model: Gemma3ForConditionalGeneration):
-    """Return the final layer norm of the LLM."""
-    return model.language_model.model.norm
+    """Return the final layer norm of the LLM.
+
+    The text backbone is at model.model (a Gemma3TextModel), with the
+    final RMS norm at model.model.norm.
+    """
+    if hasattr(model, "model") and hasattr(model.model, "norm"):
+        return model.model.norm
+    # Fallback: walk named modules to find the last LayerNorm/RMSNorm
+    norms = [(n, m) for n, m in model.named_modules()
+             if "norm" in n.lower() and not any(f"layers.{i}" in n for i in range(200))]
+    if norms:
+        return norms[-1][1]
+    raise AttributeError(f"Cannot find final norm in {type(model).__name__}. "
+                         f"Top-level children: {[n for n, _ in model.named_children()]}")
 
 
 @torch.no_grad()
