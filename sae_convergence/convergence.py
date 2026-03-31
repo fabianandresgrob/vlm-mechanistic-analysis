@@ -95,7 +95,7 @@ def load_gemma_scope_sae(
 
     for release in release_candidates:
         try:
-            sae, _cfg, _sparsity = SAE.from_pretrained(
+            sae = SAE.from_pretrained(
                 release=release,
                 sae_id=sae_id,
                 device=device,

@@ -39,6 +39,7 @@ dev = [
     "ipykernel",
     "ipywidgets",
     "jupyter",
+    "pytest>=8.0.0",
 ]
 # InternVL is not on PyPI — install from source:
 #   pip install git+https://github.com/OpenGVLab/InternVL.git
@@ -54,6 +55,10 @@ packages = [
     "scripts",
     "analysis",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["feature_search", "eva", "chain_of_embedding", "sae_convergence", "vti", "scripts", "analysis", ".venv"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
