@@ -48,7 +48,11 @@ def load_gemma3(
 
 def num_llm_layers(model: Gemma3ForConditionalGeneration) -> int:
     """Return the number of LLM decoder layers."""
-    return model.config.text_config.num_hidden_layers
+    # model.language_model is the Gemma3TextModel; its config has num_hidden_layers.
+    # Accessing via language_model avoids relying on text_config typing on the outer config.
+    if hasattr(model, "language_model"):
+        return model.language_model.config.num_hidden_layers
+    return model.config.text_config.num_hidden_layers  # type: ignore[attr-defined]
 
 
 def get_lm_head(model: Gemma3ForConditionalGeneration):

@@ -63,7 +63,7 @@ CLUSTER_ENV_SETUP = (
     "    exit 1\n"
     "fi"
 )
-DEFAULT_PARTITION = "gpu"
+DEFAULT_PARTITION = "gpu_p"
 DEFAULT_QOS = "gpu_normal"
 DEFAULT_GPUS = 1
 DEFAULT_TIME = "12:00:00"

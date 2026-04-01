@@ -50,8 +50,8 @@ def load_gemma_scope_sae(
 ):
     """Load a GemmaScope 2 SAE for a specific layer via SAELens.
 
-    GemmaScope 2 naming convention (google/gemma-scope-2-{size}-{pt|it}):
-        release = "gemma-scope-2-{size}-pt-{hook_type}[_all]"
+    GemmaScope 2 naming convention (google/gemma-scope-2-{size}-it):
+        release = "gemma-scope-2-{size}-it-{hook_type}[_all]"  (e.g. "gemma-scope-2-4b-it-resid_post_all")
         sae_id  = "layer_{N}_width_{width}_l0_{l0_level}"
 
     Available widths (all-layers): "16k", "262k"
@@ -64,7 +64,7 @@ def load_gemma_scope_sae(
     Without `_all`, only 4 depths are available (25%, 50%, 65%, 85% of model depth).
     For convergence profiling across all layers, use all_layers=True.
 
-    Note: Only PT (pretrained) variants exist; there are no IT SAEs.
+    Note: IT (instruction-tuned) all-layers SAEs cover every layer in the model.
 
     Returns None if the requested layer has no SAE.
 
@@ -91,12 +91,10 @@ def load_gemma_scope_sae(
             "sae-lens is required for Exp 2.5. Install with: uv pip install sae-lens"
         )
 
-    # SAELens uses abbreviated hook names: "resid_post" → "res", etc.
-    hook_abbrev = {"resid_post": "res", "mlp_out": "mlp", "transcoder": "transcoders"}.get(hook_type, hook_type)
-    suffix = f"{hook_abbrev}-all" if all_layers else hook_abbrev
-    # Only PT variants exist; no IT SAEs are available in GemmaScope 2.
+    # GemmaScope 2 release name format: "{hook_type}_all" for all-layers, "{hook_type}" for subset.
+    suffix = f"{hook_type}_all" if all_layers else hook_type
     release_candidates = [
-        f"gemma-scope-2-{model_size}-pt-{suffix}",
+        f"gemma-scope-2-{model_size}-it-{suffix}",
     ]
     # Width: SAELens uses "262k" not "256k"; map for convenience.
     width_mapped = {"256k": "262k", "64k": "65k"}.get(width, width)
@@ -197,7 +195,7 @@ def compute_layer_convergence_profile(
     reconstruction error and sparsity metrics.
 
     GemmaScope 2 naming:
-        release = "gemma-scope-2-{model_size}-pt-resid_post_all"
+        release = "gemma-scope-2-{model_size}-it-res-all"  (IT, layers 0-19)
         sae_id  = "layer_{N}_width_{width}_l0_{l0_level}"
 
     Args:
@@ -305,10 +303,6 @@ def compute_layer_convergence_profile(
             continue  # already processed in a previous run
         # Build inputs
         try:
-            from chain_of_embedding.models.gemma3 import _build_inputs_from_sample
-            inputs = _build_inputs_from_sample(sample, processor, device)
-        except ImportError:
-            # Inline fallback
             text = processor.apply_chat_template(
                 sample["messages"],
                 add_generation_prompt=True,
