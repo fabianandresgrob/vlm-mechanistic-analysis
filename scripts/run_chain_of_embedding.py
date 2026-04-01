@@ -144,7 +144,7 @@ def main():
         choices=["vqav2", "vlms_are_biased", "vilp", "vlind"],
     )
     parser.add_argument("--vab_dataset_id", default="anvo25/vlms-are-biased")
-    parser.add_argument("--vab_split", default="test")
+    parser.add_argument("--vab_split", default="main")
     parser.add_argument("--n_samples", type=int, default=None,
                         help="Max samples (default: all)")
     parser.add_argument("--output_dir", default="results/chain_of_embedding/")

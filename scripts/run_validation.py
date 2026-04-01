@@ -59,7 +59,7 @@ def main():
     parser.add_argument("--feature_search_dir", required=True,
                         help="Output dir from Exp 3.1 (contains top_features.json)")
     parser.add_argument("--vab_dataset_id", default="anvo25/vlms-are-biased")
-    parser.add_argument("--vab_split", default="test")
+    parser.add_argument("--vab_split", default="main")
     parser.add_argument("--n_samples", type=int, default=240)
     parser.add_argument("--n_top_features", type=int, default=20,
                         help="Number of top features from 3.1 to validate")

@@ -70,17 +70,19 @@ def load_calibration_samples(dataset: str, n_samples: int) -> list[dict]:
 def _load_vab(n_samples: int) -> list[dict]:
     from datasets import load_dataset
     logger.info("Loading VLMs Are Biased (VAB) dataset…")
-    ds = load_dataset("MMIE/VLMs_Are_Biased", split="test")
+    ds = load_dataset("anvo25/vlms-are-biased", split="main")
     samples = []
     for item in ds.select(range(min(n_samples, len(ds)))):
         samples.append({
-            "id": item.get("id", len(samples)),
+            "id": item.get("ID", len(samples)),
             "image": item["image"],
             "messages": [{"role": "user", "content": [
                 {"type": "image"},
-                {"type": "text", "text": item["question"]},
+                {"type": "text", "text": item.get("prompt", "")},
             ]}],
-            "answer": item.get("answer", ""),
+            "answer": item.get("ground_truth", "").strip().strip("{}").strip().lower(),
+            "expected_bias": item.get("expected_bias", "").strip().strip("{}").strip().lower(),
+            "topic": item.get("topic", ""),
         })
     return samples
 

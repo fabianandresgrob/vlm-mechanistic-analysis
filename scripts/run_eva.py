@@ -172,8 +172,8 @@ def main():
     )
     parser.add_argument(
         "--vab_split",
-        default="test",
-        help="Split to use for VLMs Are Biased (default: test)",
+        default="main",
+        help="Split to use for VLMs Are Biased (default: main)",
     )
     args = parser.parse_args()
 

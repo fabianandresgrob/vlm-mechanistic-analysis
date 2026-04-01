@@ -99,7 +99,7 @@ def main():
     parser.add_argument("--alpha_sweep", default="0,100,200,500",
                         help="Comma-separated alpha values")
     parser.add_argument("--vab_dataset_id", default="anvo25/vlms-are-biased")
-    parser.add_argument("--vab_split", default="test")
+    parser.add_argument("--vab_split", default="main")
     parser.add_argument("--n_samples", type=int, default=240)
     parser.add_argument("--output_dir", default="results/steering/")
     parser.add_argument("--device", default="cuda")
