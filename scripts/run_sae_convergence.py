@@ -100,14 +100,16 @@ def main():
     parser.add_argument(
         "--width",
         default="16k",
-        choices=["16k", "64k", "256k", "1m"],
-        help="SAE feature dictionary width (64k/256k recommended by GemmaScope 2)",
+        choices=["16k", "65k", "262k", "1m"],
+        help="SAE feature dictionary width. All-layers SAEs: '16k' or '262k'. "
+             "Selected-layer SAEs only: '65k' or '1m'.",
     )
     parser.add_argument(
         "--l0_level",
-        default="medium",
-        choices=["small", "medium", "large"],
-        help="SAE sparsity level: small (10-20 active), medium (30-60), large (60-150)",
+        default="small",
+        choices=["small", "big", "medium", "large"],
+        help="SAE sparsity level. All-layers: 'small' (~10-20) or 'big' (~60-120). "
+             "Selected-layer SAEs also support 'medium' and 'large'.",
     )
     parser.add_argument("--output_dir", default="results/sae_convergence/", help="Output directory")
     parser.add_argument("--device", default="cuda", help="Device: 'cuda', 'cpu', or 'auto'")

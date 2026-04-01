@@ -52,13 +52,17 @@ def load_gemma_scope_sae(
         release = "gemma-scope-2-{size}-pt-{hook_type}[_all]"
         sae_id  = "layer_{N}_width_{width}_l0_{l0_level}"
 
-    Available widths: 16k, 64k, 256k, 1m  (64k/256k recommended)
-    Available l0_level: "small" (10-20), "medium" (30-60), "large" (60-150)
-    Available hook_type: "resid_post", "attn_out", "mlp_out", "transcoder"
+    Available widths (all-layers): "16k", "262k"
+    Available widths (selected layers only): "16k", "65k", "262k", "1m"
+    Available l0_level (all-layers): "small" (~10-20), "big" (~60-120)
+    Available l0_level (selected layers): "small", "medium", "large"
+    Available hook_type: "res" (resid_post), "mlp", "transcoder"
 
     The `_all` suffix on the release name means SAEs for every layer are included.
     Without `_all`, only 4 depths are available (25%, 50%, 65%, 85% of model depth).
     For convergence profiling across all layers, use all_layers=True.
+
+    Note: Only PT (pretrained) variants exist; there are no IT SAEs.
 
     Returns None if the requested layer has no SAE.
 
@@ -85,13 +89,16 @@ def load_gemma_scope_sae(
             "sae-lens is required for Exp 2.5. Install with: uv pip install sae-lens"
         )
 
-    suffix = f"{hook_type}_all" if all_layers else hook_type
-    # Try IT first — we analyse IT model behaviour (lmms-eval was run on IT models)
+    # SAELens uses abbreviated hook names: "resid_post" → "res", etc.
+    hook_abbrev = {"resid_post": "res", "mlp_out": "mlp", "transcoder": "transcoders"}.get(hook_type, hook_type)
+    suffix = f"{hook_abbrev}-all" if all_layers else hook_abbrev
+    # Only PT variants exist; no IT SAEs are available in GemmaScope 2.
     release_candidates = [
-        f"gemma-scope-2-{model_size}-it-{suffix}",
         f"gemma-scope-2-{model_size}-pt-{suffix}",
     ]
-    sae_id = f"layer_{layer_idx}_width_{width}_l0_{l0_level}"
+    # Width: SAELens uses "262k" not "256k"; map for convenience.
+    width_mapped = {"256k": "262k", "64k": "65k"}.get(width, width)
+    sae_id = f"layer_{layer_idx}_width_{width_mapped}_l0_{l0_level}"
 
     for release in release_candidates:
         try:
@@ -104,7 +111,8 @@ def load_gemma_scope_sae(
             _sae_cache[cache_key] = sae
             logger.debug("Loaded SAE: %s / %s", release, sae_id)
             return sae
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to load %s / %s: %s", release, sae_id, e)
             continue
 
     logger.warning(
