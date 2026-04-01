@@ -31,6 +31,7 @@ import argparse, json, logging, os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chain_of_embedding.models.gemma3 import load_gemma3
+from data_loaders import load_vab as _load_vab
 from feature_search.sae_utils import load_sae
 from feature_search.steering import get_steering_vector, steered_generate
 
@@ -39,21 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 def load_vab(dataset_id, split, n_samples):
-    from datasets import load_dataset
-    ds = load_dataset(dataset_id, split=split)
-    samples = []
-    for item in ds.select(range(min(n_samples, len(ds)))):
-        samples.append({
-            "id": item.get("id") or len(samples),
-            "image": item.get("image"),
-            "messages": [{"role": "user", "content": [
-                {"type": "image"},
-                {"type": "text", "text": item.get("question") or item.get("query") or ""},
-            ]}],
-            "answer": item.get("answer") or "",
-            "category": item.get("category", ""),
-        })
-    return samples
+    return _load_vab(dataset_id=dataset_id, split=split, n_samples=n_samples)
 
 
 def run_one_latent_alpha(model, processor, samples, target_layer,

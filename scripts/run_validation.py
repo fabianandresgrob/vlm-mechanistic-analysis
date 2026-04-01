@@ -21,32 +21,12 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chain_of_embedding.models.gemma3 import load_gemma3
+from data_loaders import load_vab
 from feature_search.sae_utils import load_sae, extract_answer_token_acts
 from feature_search.validation import feature_activation_test
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
-
-
-def load_vab(dataset_id: str, split: str, n_samples: int) -> list[dict]:
-    from datasets import load_dataset
-    ds = load_dataset(dataset_id, split=split)
-    samples = []
-    for item in ds.select(range(min(n_samples, len(ds)))):
-        cf_image = item.get("cf_image") or item.get("counterfactual_image")
-        samples.append({
-            "id": item.get("id") or len(samples),
-            "image": item.get("image"),
-            "cf_image": cf_image,
-            "messages": [{"role": "user", "content": [
-                {"type": "image"},
-                {"type": "text", "text": item.get("question") or item.get("query") or ""},
-            ]}],
-            "answer": item.get("answer") or "",
-            "is_correct": float(item.get("correct", float("nan"))),
-            "category": item.get("category", ""),
-        })
-    return samples
 
 
 def main():
@@ -83,8 +63,8 @@ def main():
     sae = load_sae(args.target_layer, args.model_size, args.width, args.l0_level, args.device)
 
     # Load VAB — filter out samples with unknown correctness (nan)
-    samples = load_vab(args.vab_dataset_id, args.vab_split, args.n_samples)
-    samples = [s for s in samples if not np.isnan(s["is_correct"])]
+    samples = load_vab(dataset_id=args.vab_dataset_id, split=args.vab_split, n_samples=args.n_samples)
+    samples = [s for s in samples if not np.isnan(float(s.get("is_correct", float("nan"))))]
     if not samples:
         logger.error("No samples with valid 'is_correct' labels after filtering. Check dataset.")
         sys.exit(1)

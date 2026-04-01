@@ -38,27 +38,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chain_of_embedding.models.gemma3 import load_gemma3
+from data_loaders import load_vab, load_vqav2
 from eva.eva_decoding import eva_decode_dataset
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
-
-
-def load_vqav2(n_samples: int) -> list[dict]:
-    from datasets import load_dataset
-    ds = load_dataset("lmms-lab/VQAv2", split="validation")
-    samples = []
-    for item in ds.select(range(min(n_samples, len(ds)))):
-        samples.append({
-            "id": item.get("question_id", len(samples)),
-            "image": item["image"],
-            "messages": [{"role": "user", "content": [
-                {"type": "image"},
-                {"type": "text", "text": item["question"]},
-            ]}],
-            "answer": item.get("multiple_choice_answer", ""),
-        })
-    return samples
 
 
 def _normalize_answer(s: str) -> str:
@@ -84,26 +68,6 @@ def _vab_is_match(pred: str, target: str) -> bool:
     pred_digits = "".join(c for c in pred_n if c.isdigit())
     tgt_digits = "".join(c for c in tgt_n if c.isdigit())
     return bool(pred_digits) and bool(tgt_digits) and pred_digits == tgt_digits
-
-
-def load_vlms_are_biased(dataset_id: str, split: str, n_samples: int) -> list[dict]:
-    from datasets import load_dataset
-    ds = load_dataset(dataset_id, split=split)
-    samples = []
-    for item in ds.select(range(min(n_samples, len(ds)))):
-        samples.append({
-            "id": item.get("ID") or len(samples),
-            "image": item.get("image"),
-            "messages": [{"role": "user", "content": [
-                {"type": "image"},
-                {"type": "text", "text": item.get("prompt") or ""},
-            ]}],
-            "answer": _normalize_answer(item.get("ground_truth") or ""),
-            "expected_bias": _normalize_answer(item.get("expected_bias") or ""),
-            "topic": item.get("topic", ""),
-            "sub_topic": item.get("sub_topic", ""),
-        })
-    return samples
 
 
 def run_alpha(model, processor, samples, target_layer, alpha, output_dir, device, max_new_tokens):
@@ -217,11 +181,11 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
 
     # Load samples
-    n = args.n_samples or 999999
+    n = args.n_samples or None
     if args.dataset == "vqav2":
-        samples = load_vqav2(n)
+        samples = load_vqav2(n_samples=n)
     else:
-        samples = load_vlms_are_biased(args.vab_dataset_id, args.vab_split, n)
+        samples = load_vab(dataset_id=args.vab_dataset_id, split=args.vab_split, n_samples=n)
     logger.info("Loaded %d samples.", len(samples))
 
     # Load model

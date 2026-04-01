@@ -46,6 +46,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chain_of_embedding.models.gemma3 import load_gemma3
+from data_loaders import load_vab, load_vqav2
 from feature_search.steering import steering_hook, steered_generate
 from revis.vector_calculator import compute_revis_vector
 
@@ -60,49 +61,11 @@ logger = logging.getLogger(__name__)
 def load_calibration_samples(dataset: str, n_samples: int) -> list[dict]:
     """Load calibration samples for vector extraction."""
     if dataset == "vab":
-        return _load_vab(n_samples)
+        return load_vab(n_samples=n_samples)
     elif dataset == "vqav2":
-        return _load_vqav2(n_samples)
+        return load_vqav2(n_samples=n_samples)
     else:
         raise ValueError(f"Unknown dataset: {dataset!r}. Choose 'vab' or 'vqav2'.")
-
-
-def _load_vab(n_samples: int) -> list[dict]:
-    from datasets import load_dataset
-    logger.info("Loading VLMs Are Biased (VAB) dataset…")
-    ds = load_dataset("anvo25/vlms-are-biased", split="main")
-    samples = []
-    for item in ds.select(range(min(n_samples, len(ds)))):
-        samples.append({
-            "id": item.get("ID", len(samples)),
-            "image": item["image"],
-            "messages": [{"role": "user", "content": [
-                {"type": "image"},
-                {"type": "text", "text": item.get("prompt", "")},
-            ]}],
-            "answer": item.get("ground_truth", "").strip().strip("{}").strip().lower(),
-            "expected_bias": item.get("expected_bias", "").strip().strip("{}").strip().lower(),
-            "topic": item.get("topic", ""),
-        })
-    return samples
-
-
-def _load_vqav2(n_samples: int) -> list[dict]:
-    from datasets import load_dataset
-    logger.info("Loading VQAv2 validation split (n=%d)…", n_samples)
-    ds = load_dataset("lmms-lab/VQAv2", split="validation")
-    samples = []
-    for item in ds.select(range(min(n_samples, len(ds)))):
-        samples.append({
-            "id": item.get("question_id", len(samples)),
-            "image": item["image"],
-            "messages": [{"role": "user", "content": [
-                {"type": "image"},
-                {"type": "text", "text": item["question"]},
-            ]}],
-            "answer": item.get("multiple_choice_answer", ""),
-        })
-    return samples
 
 
 # ---------------------------------------------------------------------------

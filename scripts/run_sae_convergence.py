@@ -30,6 +30,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chain_of_embedding.models.gemma3 import load_gemma3, num_llm_layers
+from data_loaders import load_vqav2
 from sae_convergence.convergence import (
     compute_layer_convergence_profile,
     find_convergence_layer,
@@ -38,32 +39,6 @@ from sae_convergence.convergence import (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
-
-
-def load_vqav2_samples(n_samples: int) -> list[dict]:
-    """Load VQAv2 validation samples for convergence probing."""
-    from datasets import load_dataset
-
-    logger.info("Loading VQAv2 validation split (n=%d)…", n_samples)
-    ds = load_dataset("lmms-lab/VQAv2", split="validation", streaming=False)
-    samples = []
-    for item in ds.select(range(min(n_samples, len(ds)))):
-        samples.append(
-            {
-                "id": item.get("question_id", len(samples)),
-                "image": item["image"],
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "image"},
-                            {"type": "text", "text": item["question"]},
-                        ],
-                    }
-                ],
-            }
-        )
-    return samples
 
 
 def parse_layers(layers_str: str, n_total: int) -> list[int]:
@@ -133,7 +108,7 @@ def main():
     logger.info("Probing layers: %s", layers)
 
     # --- Load samples ---
-    samples = load_vqav2_samples(args.n_samples)
+    samples = load_vqav2(n_samples=args.n_samples)
     logger.info("Loaded %d samples.", len(samples))
 
     # --- Compute convergence profile ---

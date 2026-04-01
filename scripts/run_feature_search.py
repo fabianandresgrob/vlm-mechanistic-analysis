@@ -25,27 +25,12 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chain_of_embedding.models.gemma3 import load_gemma3
+from data_loaders import load_vqav2
 from feature_search.sae_utils import load_sae, extract_answer_token_acts
 from feature_search.contrastive_search import separation_scores
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
-
-
-def load_vqav2(n_samples):
-    from datasets import load_dataset
-    ds = load_dataset("lmms-lab/VQAv2", split="validation")
-    samples = []
-    for item in ds.select(range(min(n_samples, len(ds)))):
-        samples.append({
-            "id": item.get("question_id", len(samples)),
-            "image": item["image"],
-            "messages": [{"role": "user", "content": [
-                {"type": "image"},
-                {"type": "text", "text": item["question"]},
-            ]}],
-        })
-    return samples
 
 
 def main():
@@ -76,7 +61,7 @@ def main():
     model, processor = load_gemma3(args.model, device=args.device)
 
     logger.info("Loading %d VQAv2 samples…", args.n_samples)
-    samples = load_vqav2(args.n_samples)
+    samples = load_vqav2(n_samples=args.n_samples)
 
     logger.info("Extracting activations at layer %d…", args.target_layer)
     acts_vis, acts_blind = extract_answer_token_acts(

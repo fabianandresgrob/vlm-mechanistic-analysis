@@ -50,57 +50,10 @@ from chain_of_embedding.contrastive_forward import (
 from chain_of_embedding.models.gemma3 import load_gemma3, num_llm_layers
 from chain_of_embedding.tvi import compute_tvi, tvi_statistics
 from chain_of_embedding.vip import aggregate_vip, compute_layer_distances, detect_vip
+from data_loaders import load_vab, load_vilp, load_vlind_bench, load_vqav2, to_contrastive_sample
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Dataset loaders
-# ---------------------------------------------------------------------------
-
-def load_vqav2_samples(n_samples: int) -> list[ContrastiveSample]:
-    from datasets import load_dataset
-    logger.info("Loading VQAv2 validation (n=%d)…", n_samples)
-    ds = load_dataset("lmms-lab/VQAv2", split="validation")
-    samples = []
-    for item in ds.select(range(min(n_samples, len(ds)))):
-        samples.append(ContrastiveSample(
-            id=item.get("question_id", len(samples)),
-            image=item["image"],
-            cf_image=None,   # VQAv2 has no counterfactuals
-            messages=[{"role": "user", "content": [
-                {"type": "image"},
-                {"type": "text", "text": item["question"]},
-            ]}],
-            answer=item.get("multiple_choice_answer", ""),
-        ))
-    return samples
-
-
-def load_vlms_are_biased_samples(dataset_id: str, split: str, n_samples: int) -> list[ContrastiveSample]:
-    from datasets import load_dataset
-    logger.info("Loading VLMs Are Biased from %s / %s…", dataset_id, split)
-    ds = load_dataset(dataset_id, split=split)
-    samples = []
-    for item in ds.select(range(min(n_samples, len(ds)))):
-        question = item.get("question") or item.get("query") or ""
-        answer = item.get("answer") or item.get("gt_answer") or ""
-        # Load counterfactual image — field name varies by dataset version
-        cf_image = item.get("cf_image") or item.get("counterfactual_image")
-        samples.append(ContrastiveSample(
-            id=item.get("id") or item.get("question_id") or len(samples),
-            image=item.get("image"),
-            cf_image=cf_image,
-            messages=[{"role": "user", "content": [
-                {"type": "image"},
-                {"type": "text", "text": question},
-            ]}],
-            answer=answer,
-        ))
-    logger.info("Loaded %d samples (%d with counterfactuals).",
-                len(samples), sum(s.cf_image is not None for s in samples))
-    return samples
 
 
 # ---------------------------------------------------------------------------
@@ -170,13 +123,18 @@ def main():
         return
 
     # --- Load samples ---
-    n = args.n_samples or 999999
+    n = args.n_samples or None
     if args.dataset == "vqav2":
-        samples = load_vqav2_samples(n)
+        raw = load_vqav2(n_samples=n)
     elif args.dataset == "vlms_are_biased":
-        samples = load_vlms_are_biased_samples(args.vab_dataset_id, args.vab_split, n)
+        raw = load_vab(dataset_id=args.vab_dataset_id, split=args.vab_split, n_samples=n)
+    elif args.dataset == "vilp":
+        raw = load_vilp(n_samples=n)
+    elif args.dataset == "vlind":
+        raw = load_vlind_bench(n_samples=n)
     else:
         raise ValueError(f"Dataset {args.dataset!r} loader not yet implemented.")
+    samples = [to_contrastive_sample(d) for d in raw]
 
     # --- Load model ---
     logger.info("Loading %s…", args.model)

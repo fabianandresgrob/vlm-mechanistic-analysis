@@ -29,6 +29,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chain_of_embedding.models.gemma3 import load_gemma3
+from data_loaders import load_vab, load_vqav2
 from eva.js_divergence import (
     compute_layer_js_divergence,
     correlate_with_correctness,
@@ -37,79 +38,6 @@ from eva.js_divergence import (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
-
-
-def load_vqav2_samples(n_samples: int) -> list[dict]:
-    """Load VQAv2 validation samples in the expected format."""
-    from datasets import load_dataset
-
-    logger.info("Loading VQAv2 validation split (n=%d)…", n_samples)
-    ds = load_dataset("lmms-lab/VQAv2", split="validation", streaming=False)
-    samples = []
-    for item in ds.select(range(min(n_samples, len(ds)))):
-        samples.append(
-            {
-                "id": item.get("question_id", len(samples)),
-                "image": item["image"],
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "image"},
-                            {"type": "text", "text": item["question"]},
-                        ],
-                    }
-                ],
-                "answer": item.get("multiple_choice_answer", ""),
-                "is_correct": float("nan"),  # filled in from lmms-eval if available
-            }
-        )
-    return samples
-
-
-def load_vlms_are_biased_samples(hf_dataset_id: str, n_samples: int, split: str = "test") -> list[dict]:
-    """Load VLMs Are Biased samples from HuggingFace datasets cache.
-
-    The dataset is expected to have been downloaded previously (e.g. during lmms-eval).
-    `load_dataset` will use HF_DATASETS_CACHE automatically.
-
-    Args:
-        hf_dataset_id: HuggingFace dataset repo ID (e.g. "MMInstruction/VLMsBiased").
-                       Pass via --vab_dataset_id on the CLI.
-        n_samples: Maximum number of samples to load.
-        split: Dataset split to use (default "test").
-    """
-    from datasets import load_dataset
-
-    logger.info("Loading VLMs Are Biased from HF cache (id=%s, split=%s)…", hf_dataset_id, split)
-    ds = load_dataset(hf_dataset_id, split=split)
-    samples = []
-    for item in ds.select(range(min(n_samples, len(ds)))):
-        # Field names vary by dataset version — try common variants
-        question = item.get("question") or item.get("query") or ""
-        answer = item.get("answer") or item.get("gt_answer") or ""
-        image = item.get("image")  # PIL Image if dataset stores images inline
-        is_correct = float(item["correct"]) if "correct" in item else float("nan")
-        samples.append(
-            {
-                "id": item.get("id") or item.get("question_id") or len(samples),
-                "image": image,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "image"},
-                            {"type": "text", "text": question},
-                        ],
-                    }
-                ],
-                "answer": answer,
-                "is_correct": is_correct,
-                "category": item.get("category", ""),
-            }
-        )
-    logger.info("Loaded %d VLMs Are Biased samples.", len(samples))
-    return samples
 
 
 def try_attach_correctness(samples: list[dict], lmms_results_path: str, model_id: str) -> list[dict]:
@@ -184,10 +112,10 @@ def main():
 
     # --- Load samples ---
     if args.dataset == "vqav2":
-        samples = load_vqav2_samples(args.n_samples)
+        samples = load_vqav2(n_samples=args.n_samples)
     elif args.dataset == "vlms_are_biased":
-        samples = load_vlms_are_biased_samples(
-            args.vab_dataset_id, args.n_samples, split=args.vab_split
+        samples = load_vab(
+            dataset_id=args.vab_dataset_id, split=args.vab_split, n_samples=args.n_samples
         )
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")

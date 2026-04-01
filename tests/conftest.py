@@ -21,10 +21,13 @@ import torch
 def pytest_addoption(parser):
     parser.addoption("--model", default=None, help="HuggingFace model ID for integration tests")
     parser.addoption("--device", default=None, help="Force device (cuda/mps/cpu). Auto-detected if omitted.")
+    parser.addoption("--download", action="store_true", default=False,
+                     help="Run dataset download tests (requires internet; cached after first run)")
 
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "integration: requires a real model (--model flag)")
+    config.addinivalue_line("markers", "download: requires internet / HuggingFace dataset downloads (--download flag)")
 
 
 def pytest_collection_modifyitems(config, items):
@@ -32,6 +35,12 @@ def pytest_collection_modifyitems(config, items):
         skip = pytest.mark.skip(reason="Pass --model <model_id> to run integration tests")
         for item in items:
             if "integration" in item.keywords:
+                item.add_marker(skip)
+
+    if not config.getoption("--download"):
+        skip = pytest.mark.skip(reason="Pass --download to run dataset download tests")
+        for item in items:
+            if "download" in item.keywords:
                 item.add_marker(skip)
 
 
