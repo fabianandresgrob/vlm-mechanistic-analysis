@@ -45,7 +45,7 @@ def load_vqav2_samples(n_samples: int) -> list[dict]:
     from datasets import load_dataset
 
     logger.info("Loading VQAv2 validation split (n=%d)…", n_samples)
-    ds = load_dataset("HuggingFaceM4/VQAv2", split="validation", streaming=False)
+    ds = load_dataset("lmms-lab/VQAv2", split="validation", streaming=False)
     samples = []
     for item in ds.select(range(min(n_samples, len(ds)))):
         samples.append(
