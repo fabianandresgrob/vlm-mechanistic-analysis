@@ -29,6 +29,11 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def is_match(pred: str, target: str) -> bool:
+    """Exact match after lowercase + strip (VLind-Bench answers are 'true'/'false')."""
+    return pred.strip().lower() == target.strip().lower()
+
+
 # ---------------------------------------------------------------------------
 # Internal path helpers
 # ---------------------------------------------------------------------------

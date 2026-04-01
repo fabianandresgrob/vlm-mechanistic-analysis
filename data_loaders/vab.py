@@ -24,6 +24,21 @@ def _normalize(s: str) -> str:
     return s.strip().strip("{}").strip().lower()
 
 
+def is_match(pred: str, target: str) -> bool:
+    """Match prediction against target following lmms-eval VAB logic.
+
+    1. Exact match after normalization (strip {}, lowercase).
+    2. Numeric fallback: extract digits and compare (handles "2" vs "{2}").
+    """
+    pred_n = _normalize(pred)
+    tgt_n = _normalize(target)
+    if pred_n == tgt_n:
+        return True
+    pred_digits = "".join(c for c in pred_n if c.isdigit())
+    tgt_digits = "".join(c for c in tgt_n if c.isdigit())
+    return bool(pred_digits) and bool(tgt_digits) and pred_digits == tgt_digits
+
+
 def load_vab(
     dataset_id: str = "anvo25/vlms-are-biased",
     split: str = "main",

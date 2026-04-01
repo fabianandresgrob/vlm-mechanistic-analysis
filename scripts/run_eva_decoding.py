@@ -21,9 +21,9 @@ Sweeping alpha (for ablation):
         --output_dir results/eva_decoding/
 
 Outputs:
-    {output_dir}/{model_slug}/{dataset}/alpha_{alpha}/
+    {output_dir}/{model_slug}/{dataset}/layer_{N}/alpha_{alpha}/
         results.jsonl   — per-sample vanilla vs EVA answers
-        summary.json    — accuracy delta table
+        summary.json    — accuracy (+ bias_ratio for VAB)
 """
 
 from __future__ import annotations
@@ -38,39 +38,15 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chain_of_embedding.models.gemma3 import load_gemma3
-from data_loaders import load_vab, load_vqav2
+from data_loaders import get_is_match, load_vab, load_vilp, load_vlind_bench, load_vqav2
 from eva.eva_decoding import eva_decode_dataset
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def _normalize_answer(s: str) -> str:
-    """Strip curly-bracket formatting and lowercase.
-
-    VAB prompts ask for answers in {Yes}/{No} format, but ground truth is
-    stored as plain 'Yes'/'No'. Models may or may not include the brackets.
-    """
-    return s.strip().strip("{}").strip().lower()
-
-
-def _vab_is_match(pred: str, target: str) -> bool:
-    """Match prediction against target following lmms-eval VAB logic.
-
-    1. Exact match after normalization.
-    2. Fallback: extract digits and compare numerically.
-    Mirrors vlms_are_biased_process_results in lmms-eval/tasks/vlms_are_biased/utils.py.
-    """
-    pred_n = _normalize_answer(pred)
-    tgt_n = _normalize_answer(target)
-    if pred_n == tgt_n:
-        return True
-    pred_digits = "".join(c for c in pred_n if c.isdigit())
-    tgt_digits = "".join(c for c in tgt_n if c.isdigit())
-    return bool(pred_digits) and bool(tgt_digits) and pred_digits == tgt_digits
-
-
-def run_alpha(model, processor, samples, target_layer, alpha, output_dir, device, max_new_tokens):
+def run_alpha(model, processor, samples, dataset, target_layer, alpha,
+              output_dir, device, max_new_tokens):
     alpha_dir = os.path.join(output_dir, f"alpha_{alpha:.2f}")
     os.makedirs(alpha_dir, exist_ok=True)
 
@@ -84,35 +60,34 @@ def run_alpha(model, processor, samples, target_layer, alpha, output_dir, device
         model, processor, samples, target_layer, alpha, device, max_new_tokens
     )
 
-    # Re-evaluate using lmms-eval-compatible metrics and attach expected_bias.
-    # NOTE: main split contains each image at 3 resolutions — consistent with
-    # how lmms-eval ran WS1, so we keep all triplicates rather than deduplicating.
+    is_match = get_is_match(dataset)
     sample_by_id = {s["id"]: s for s in samples}
+
+    # VAB-specific per-topic and bias tracking
     topic_stats: dict[str, dict[str, int]] = {}
 
     for r in results:
         s = sample_by_id.get(r.get("id"), {})
         gt = s.get("answer", "")
-        bias = s.get("expected_bias", "")
-        r["expected_bias"] = bias
-        r["topic"] = s.get("topic", "")
 
-        # Recompute correctness with numeric fallback (matches lmms-eval logic)
         if gt:
-            r["is_correct_vanilla"] = _vab_is_match(r["vanilla_answer"], gt)
-            r["is_correct_eva"] = _vab_is_match(r["eva_answer"], gt)
-        # bias_ratio: unconditional — does the model say the biased answer?
-        # Lower is better (lmms-eval: higher_is_better: false)
-        r["vanilla_matches_bias"] = _vab_is_match(r["vanilla_answer"], bias) if bias else False
-        r["eva_matches_bias"] = _vab_is_match(r["eva_answer"], bias) if bias else False
+            r["is_correct_vanilla"] = is_match(r["vanilla_answer"], gt)
+            r["is_correct_eva"] = is_match(r["eva_answer"], gt)
 
-        # Per-topic tracking
-        topic = r["topic"] or "unknown"
-        if topic not in topic_stats:
-            topic_stats[topic] = {"vanilla_correct": 0, "eva_correct": 0, "n": 0}
-        topic_stats[topic]["n"] += 1
-        topic_stats[topic]["vanilla_correct"] += int(r.get("is_correct_vanilla", False))
-        topic_stats[topic]["eva_correct"] += int(r.get("is_correct_eva", False))
+        # VAB-only: bias ratio
+        if dataset == "vlms_are_biased":
+            bias = s.get("expected_bias", "")
+            r["expected_bias"] = bias
+            r["topic"] = s.get("topic", "")
+            r["vanilla_matches_bias"] = is_match(r["vanilla_answer"], bias) if bias else False
+            r["eva_matches_bias"] = is_match(r["eva_answer"], bias) if bias else False
+
+            topic = r["topic"] or "unknown"
+            if topic not in topic_stats:
+                topic_stats[topic] = {"vanilla_correct": 0, "eva_correct": 0, "n": 0}
+            topic_stats[topic]["n"] += 1
+            topic_stats[topic]["vanilla_correct"] += int(r.get("is_correct_vanilla", False))
+            topic_stats[topic]["eva_correct"] += int(r.get("is_correct_eva", False))
 
     with jsonlines.open(os.path.join(alpha_dir, "results.jsonl"), "w") as writer:
         writer.write_all(results)
@@ -121,31 +96,31 @@ def run_alpha(model, processor, samples, target_layer, alpha, output_dir, device
     summary = {
         "alpha": alpha,
         "target_layer": target_layer,
+        "dataset": dataset,
         "n": n,
-        # Accuracy (lmms-eval compatible)
         "vanilla_accuracy": sum(r.get("is_correct_vanilla", False) for r in results) / n,
         "eva_accuracy": sum(r.get("is_correct_eva", False) for r in results) / n,
         "accuracy_delta": (
             sum(r.get("is_correct_eva", False) for r in results)
             - sum(r.get("is_correct_vanilla", False) for r in results)
         ) / n,
-        # Bias ratio — unconditional, lower is better (mirrors lmms-eval)
-        "vanilla_bias_ratio": sum(r.get("vanilla_matches_bias", False) for r in results) / n,
-        "eva_bias_ratio": sum(r.get("eva_matches_bias", False) for r in results) / n,
-        "bias_ratio_delta": (
+    }
+
+    if dataset == "vlms_are_biased":
+        summary["vanilla_bias_ratio"] = sum(r.get("vanilla_matches_bias", False) for r in results) / n
+        summary["eva_bias_ratio"] = sum(r.get("eva_matches_bias", False) for r in results) / n
+        summary["bias_ratio_delta"] = (
             sum(r.get("eva_matches_bias", False) for r in results)
             - sum(r.get("vanilla_matches_bias", False) for r in results)
-        ) / n,
-        # Per-topic accuracy
-        "accuracy_by_topic": {
+        ) / n
+        summary["accuracy_by_topic"] = {
             topic: {
                 "vanilla": d["vanilla_correct"] / d["n"],
                 "eva": d["eva_correct"] / d["n"],
                 "n": d["n"],
             }
             for topic, d in topic_stats.items()
-        },
-    }
+        }
 
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
@@ -157,7 +132,7 @@ def main():
     parser = argparse.ArgumentParser(description="Exp 2.2: EVA Corrected Decoding")
     parser.add_argument("--model", default="google/gemma-3-4b-it")
     parser.add_argument("--dataset", default="vlms_are_biased",
-                        choices=["vqav2", "vlms_are_biased"])
+                        choices=["vqav2", "vlms_are_biased", "vilp", "vlind"])
     parser.add_argument("--vab_dataset_id", default="anvo25/vlms-are-biased")
     parser.add_argument("--vab_split", default="main")
     parser.add_argument("--n_samples", type=int, default=None)
@@ -166,8 +141,8 @@ def main():
     parser.add_argument("--alpha", type=float, default=1.0,
                         help="EVA correction strength")
     parser.add_argument("--alpha_sweep", default=None,
-                        help="Comma-separated alpha values for ablation, e.g. '0.0,0.5,1.0,2.0'")
-    parser.add_argument("--max_new_tokens", type=int, default=10)
+                        help="Comma-separated alpha values, e.g. '0.0,0.5,1.0,2.0'")
+    parser.add_argument("--max_new_tokens", type=int, default=3)
     parser.add_argument("--output_dir", default="results/eva_decoding/")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
@@ -184,39 +159,36 @@ def main():
     n = args.n_samples or None
     if args.dataset == "vqav2":
         samples = load_vqav2(n_samples=n)
-    else:
+    elif args.dataset == "vlms_are_biased":
         samples = load_vab(dataset_id=args.vab_dataset_id, split=args.vab_split, n_samples=n)
+    elif args.dataset == "vilp":
+        samples = load_vilp(n_samples=n)
+    elif args.dataset == "vlind":
+        samples = load_vlind_bench(n_samples=n)
     logger.info("Loaded %d samples.", len(samples))
 
-    # Load model
     logger.info("Loading %s…", args.model)
     model, processor = load_gemma3(args.model, device=args.device)
 
-    # Determine alpha values to run
-    if args.alpha_sweep:
-        alphas = [float(a) for a in args.alpha_sweep.split(",")]
-    else:
-        alphas = [args.alpha]
+    alphas = [float(a) for a in args.alpha_sweep.split(",")] if args.alpha_sweep else [args.alpha]
 
     all_summaries = []
     for alpha in alphas:
         logger.info("Running EVA decode with alpha=%.2f…", alpha)
         summary = run_alpha(
-            model, processor, samples, args.target_layer, alpha,
-            output_dir, args.device, args.max_new_tokens,
+            model, processor, samples, args.dataset, args.target_layer,
+            alpha, output_dir, args.device, args.max_new_tokens,
         )
         all_summaries.append(summary)
-        print(
-            f"α={alpha:.2f}  "
-            f"acc: vanilla={summary.get('vanilla_accuracy', 0):.3f}  "
-            f"eva={summary.get('eva_accuracy', 0):.3f}  "
-            f"Δ={summary.get('accuracy_delta', 0):+.3f}  |  "
-            f"bias_ratio: vanilla={summary.get('vanilla_bias_ratio', 0):.3f}  "
-            f"eva={summary.get('eva_bias_ratio', 0):.3f}  "
-            f"Δ={summary.get('bias_ratio_delta', 0):+.3f}"
-        )
+        line = (f"α={alpha:.2f}  vanilla={summary.get('vanilla_accuracy', 0):.3f}  "
+                f"eva={summary.get('eva_accuracy', 0):.3f}  "
+                f"Δ={summary.get('accuracy_delta', 0):+.3f}")
+        if "vanilla_bias_ratio" in summary:
+            line += (f"  |  bias: vanilla={summary['vanilla_bias_ratio']:.3f}  "
+                     f"eva={summary['eva_bias_ratio']:.3f}  "
+                     f"Δ={summary['bias_ratio_delta']:+.3f}")
+        print(line)
 
-    # Save combined sweep summary
     with open(os.path.join(output_dir, "sweep_summary.json"), "w") as f:
         json.dump(all_summaries, f, indent=2)
 

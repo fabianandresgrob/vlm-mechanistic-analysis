@@ -28,10 +28,23 @@ Note: this package is named ``data_loaders`` (not ``datasets``) to avoid shadowi
 the HuggingFace ``datasets`` library.  Import as shown above.
 """
 
+from .vab import is_match as vab_is_match
 from .vab import load_vab
+from .vilp import is_match as vilp_is_match
 from .vilp import load_vilp
 from .vlind_bench import expand_vlind_bench_stages, load_vlind_bench
+from .vlind_bench import is_match as vlind_is_match
 from .vqav2 import load_vqav2
+
+
+def get_is_match(dataset: str):
+    """Return the correct is_match function for the given dataset name."""
+    return {
+        "vlms_are_biased": vab_is_match,
+        "vilp": vilp_is_match,
+        "vlind": vlind_is_match,
+        "vqav2": lambda p, t: p.strip().lower() == t.strip().lower(),
+    }.get(dataset, lambda p, t: p.strip().lower() == t.strip().lower())
 
 
 def to_contrastive_sample(d: dict):
@@ -53,5 +66,9 @@ __all__ = [
     "load_vlind_bench",
     "expand_vlind_bench_stages",
     "load_vqav2",
+    "vab_is_match",
+    "vilp_is_match",
+    "vlind_is_match",
+    "get_is_match",
     "to_contrastive_sample",
 ]

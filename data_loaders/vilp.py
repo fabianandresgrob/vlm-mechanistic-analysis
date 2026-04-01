@@ -21,6 +21,11 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def is_match(pred: str, target: str) -> bool:
+    """Exact match after lowercase + strip (ViLP answers are single words)."""
+    return pred.strip().lower() == target.strip().lower()
+
+
 def load_vilp(n_samples: int | None = None) -> list[dict]:
     """Load ViLP samples.
 

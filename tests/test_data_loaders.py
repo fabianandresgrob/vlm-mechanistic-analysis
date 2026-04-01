@@ -472,6 +472,107 @@ class TestToContrastiveSample:
 
 
 # ---------------------------------------------------------------------------
+# is_match functions
+# ---------------------------------------------------------------------------
+
+class TestVABIsMatch:
+    def test_exact_match(self):
+        from data_loaders import vab_is_match
+        assert vab_is_match("yes", "yes")
+
+    def test_case_insensitive(self):
+        from data_loaders import vab_is_match
+        assert vab_is_match("Yes", "yes")
+        assert vab_is_match("YES", "yes")
+
+    def test_curly_brackets_stripped(self):
+        from data_loaders import vab_is_match
+        assert vab_is_match("{Yes}", "yes")
+        assert vab_is_match("yes", "{yes}")
+        assert vab_is_match("{Yes}", "{yes}")
+
+    def test_numeric_fallback(self):
+        from data_loaders import vab_is_match
+        assert vab_is_match("2", "2")
+        assert vab_is_match("{2}", "2")
+        assert vab_is_match("2 dogs", "2")   # digit extracted from longer answer
+
+    def test_no_match(self):
+        from data_loaders import vab_is_match
+        assert not vab_is_match("yes", "no")
+        assert not vab_is_match("2", "3")
+
+    def test_empty_target_no_crash(self):
+        from data_loaders import vab_is_match
+        assert not vab_is_match("yes", "")
+        assert not vab_is_match("", "yes")
+
+
+class TestViLPIsMatch:
+    def test_exact_match(self):
+        from data_loaders import vilp_is_match
+        assert vilp_is_match("blue", "blue")
+
+    def test_case_insensitive(self):
+        from data_loaders import vilp_is_match
+        assert vilp_is_match("Blue", "blue")
+        assert vilp_is_match("BLUE", "blue")
+
+    def test_whitespace_stripped(self):
+        from data_loaders import vilp_is_match
+        assert vilp_is_match("  blue  ", "blue")
+
+    def test_no_match(self):
+        from data_loaders import vilp_is_match
+        assert not vilp_is_match("blue", "red")
+        assert not vilp_is_match("three", "four")
+
+
+class TestVLindIsMatch:
+    def test_true_false(self):
+        from data_loaders import vlind_is_match
+        assert vlind_is_match("true", "true")
+        assert vlind_is_match("false", "false")
+
+    def test_case_insensitive(self):
+        from data_loaders import vlind_is_match
+        assert vlind_is_match("True", "true")
+        assert vlind_is_match("False", "false")
+        assert vlind_is_match("TRUE", "true")
+
+    def test_no_match(self):
+        from data_loaders import vlind_is_match
+        assert not vlind_is_match("true", "false")
+        assert not vlind_is_match("false", "true")
+
+
+class TestGetIsMatch:
+    def test_dispatches_to_vab(self):
+        from data_loaders import get_is_match
+        fn = get_is_match("vlms_are_biased")
+        assert fn("{Yes}", "yes")          # curly brackets — VAB-specific
+        assert fn("2 dogs", "2")           # numeric fallback — VAB-specific
+
+    def test_dispatches_to_vilp(self):
+        from data_loaders import get_is_match
+        fn = get_is_match("vilp")
+        assert fn("Blue", "blue")
+        assert not fn("blue", "red")
+
+    def test_dispatches_to_vlind(self):
+        from data_loaders import get_is_match
+        fn = get_is_match("vlind")
+        assert fn("True", "true")
+        assert not fn("true", "false")
+
+    def test_unknown_dataset_falls_back_to_exact(self):
+        from data_loaders import get_is_match
+        fn = get_is_match("some_new_dataset")
+        assert fn("cat", "cat")
+        assert not fn("cat", "dog")
+
+
+# ---------------------------------------------------------------------------
 # Script API compatibility
 # ---------------------------------------------------------------------------
 
