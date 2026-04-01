@@ -107,6 +107,13 @@ def build_sbatch(
 
     script_args_str = " ".join(f'"{a}"' if " " in a else a for a in script_args)
 
+    # Indent env_setup so every line matches the 8-space indentation of the
+    # f-string template — otherwise textwrap.dedent finds no common prefix and
+    # leaves all #SBATCH directives with 8 spaces of leading whitespace, which
+    # causes SLURM to silently ignore them.
+    indent = "        "  # 8 spaces
+    env_setup_indented = ("\n" + indent).join(env_setup.splitlines())
+
     return textwrap.dedent(f"""\
         #!/bin/bash
         #SBATCH --job-name={job_name}
@@ -127,7 +134,7 @@ def build_sbatch(
         cd {repo_root}
 
         # Activate environment
-        {env_setup}
+        {env_setup_indented}
 
         python {script_path} {script_args_str}
 
