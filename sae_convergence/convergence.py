@@ -11,8 +11,10 @@ Expected finding: convergence around layer 18 (Venhoff et al. found ~18 in Gemma
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import signal
 from typing import Optional
 
 import matplotlib.pyplot as plt
@@ -226,11 +228,13 @@ def compute_layer_convergence_profile(
     if layers is None:
         layers = list(range(0, n_total_layers, 2))
 
-    # Check resume
+    checkpoint_path = os.path.join(output_dir, "checkpoint.json") if output_dir else None
+
+    # Check resume — final result first, then partial checkpoint
     if resume and output_dir:
         cache_path = os.path.join(output_dir, "convergence_profile.npz")
         if os.path.exists(cache_path):
-            logger.info("Loading cached convergence profile from %s", cache_path)
+            logger.info("Loading completed profile from %s", cache_path)
             data = np.load(cache_path, allow_pickle=True)
             return {k: data[k].tolist() if data[k].dtype == object else data[k] for k in data.files}
 
@@ -238,6 +242,28 @@ def compute_layer_convergence_profile(
     layer_metrics: dict[int, dict[str, list]] = {
         li: {"visual": [], "text": []} for li in layers
     }
+
+    # Resume from partial checkpoint
+    n_done = 0
+    if resume and checkpoint_path and os.path.exists(checkpoint_path):
+        with open(checkpoint_path) as f:
+            ckpt = json.load(f)
+        for li_str, data in ckpt.get("layer_metrics", {}).items():
+            li = int(li_str)
+            if li in layer_metrics:
+                layer_metrics[li] = data
+        n_done = ckpt.get("n_processed", 0)
+        logger.info("Resumed from checkpoint: %d / %d samples already done.", n_done, len(samples))
+
+    def _save_checkpoint(n_processed: int) -> None:
+        if not checkpoint_path:
+            return
+        os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+        tmp = checkpoint_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"n_processed": n_processed, "layer_metrics": {str(k): v for k, v in layer_metrics.items()}}, f)
+        os.replace(tmp, checkpoint_path)  # atomic on POSIX
+        logger.debug("Checkpoint saved: %d samples.", n_processed)
 
     # Pre-check which layers have SAEs available; avoid re-loading per sample
     available_layers = []
@@ -264,8 +290,19 @@ def compute_layer_convergence_profile(
         available_layers,
     )
 
+    # Save on SIGTERM (SLURM sends this before SIGKILL, ~60s grace period)
+    _sigterm_received = [False]
+    def _sigterm_handler(signum, frame):
+        logger.warning("SIGTERM received — saving checkpoint and exiting cleanly.")
+        _sigterm_received[0] = True
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+
+    CHECKPOINT_EVERY = 50  # save every N successfully processed samples
     n_skipped = 0
-    for sample in tqdm(samples, desc="Computing convergence profile"):
+    n_processed = n_done
+    for i, sample in enumerate(tqdm(samples, desc="Computing convergence profile")):
+        if i < n_done:
+            continue  # already processed in a previous run
         # Build inputs
         try:
             from chain_of_embedding.models.gemma3 import _build_inputs_from_sample
@@ -338,7 +375,18 @@ def compute_layer_convergence_profile(
         if device != "cpu":
             torch.cuda.empty_cache()
 
-    logger.info("Processed %d samples (%d skipped).", len(samples) - n_skipped, n_skipped)
+        n_processed += 1
+        if n_processed % CHECKPOINT_EVERY == 0:
+            _save_checkpoint(n_processed)
+
+        if _sigterm_received[0]:
+            _save_checkpoint(n_processed)
+            logger.info("Exiting after SIGTERM. Rerun with --resume to continue.")
+            raise SystemExit(0)
+
+    logger.info("Processed %d samples (%d skipped).", n_processed, n_skipped)
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        os.remove(checkpoint_path)  # clean up; final .npz is the authoritative result
 
     # Aggregate
     def _agg(metrics_list: list[dict], key: str) -> float:
