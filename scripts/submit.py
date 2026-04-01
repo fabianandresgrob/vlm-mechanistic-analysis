@@ -50,14 +50,17 @@ import textwrap
 from datetime import datetime
 
 # ---------------------------------------------------------------------------
-# Cluster-specific defaults — edit these once for your cluster
+# Cluster-specific defaults
 # ---------------------------------------------------------------------------
 CLUSTER_ENV_SETUP = (
-    # Activate conda env if CONDA_DEFAULT_ENV is set, otherwise activate .venv
-    "if [ -n \"$CONDA_DEFAULT_ENV\" ]; then\n"
+    # Prefer local uv/venv environment first, then conda env, otherwise fail clearly
+    "if [ -f .venv/bin/activate ]; then\n"
+    "    source .venv/bin/activate\n"
+    "elif [ -n \"$CONDA_DEFAULT_ENV\" ]; then\n"
     "    conda activate $CONDA_DEFAULT_ENV\n"
     "else\n"
-    "    source .venv/bin/activate\n"
+    "    echo \"No environment found (.venv missing and CONDA_DEFAULT_ENV not set).\" >&2\n"
+    "    exit 1\n"
     "fi"
 )
 DEFAULT_PARTITION = "gpu"
