@@ -43,7 +43,7 @@ def load_gemma_scope_sae(
     layer_idx: int,
     model_size: str = "4b",
     width: str = "16k",
-    l0_level: str = "medium",
+    l0_level: str = "big",
     hook_type: str = "resid_post",
     all_layers: bool = True,
     device: str = "cuda",
@@ -91,8 +91,10 @@ def load_gemma_scope_sae(
             "sae-lens is required for Exp 2.5. Install with: uv pip install sae-lens"
         )
 
-    # GemmaScope 2 release name format: "{hook_type}_all" for all-layers, "{hook_type}" for subset.
-    suffix = f"{hook_type}_all" if all_layers else hook_type
+    # SAELens release names use abbreviated hook type: "resid_post" → "res", etc.
+    # The _all suffix uses a hyphen: "res-all" (not "resid_post_all" which is the HF folder name).
+    hook_abbrev = {"resid_post": "res", "mlp_out": "mlp", "transcoder": "transcoders"}.get(hook_type, hook_type)
+    suffix = f"{hook_abbrev}-all" if all_layers else hook_abbrev
     release_candidates = [
         f"gemma-scope-2-{model_size}-it-{suffix}",
     ]
@@ -181,7 +183,7 @@ def compute_layer_convergence_profile(
     device: str = "cuda",
     batch_size: int = 1,
     width: str = "16k",
-    l0_level: str = "medium",
+    l0_level: str = "big",
     output_dir: Optional[str] = None,
     resume: bool = False,
 ) -> dict:
