@@ -88,12 +88,14 @@ def eva_decode_sample(
 
     # --- EVA corrected decode (token-by-token) ---
     eva_input_ids = inputs["input_ids"].clone()
-    eva_pixel_values = inputs.get("pixel_values")
+    eva_attention_mask = inputs["attention_mask"].clone() if "attention_mask" in inputs else None
     eva_generated = []
 
     for _ in range(max_new_tokens):
         current_inputs = dict(inputs)
         current_inputs["input_ids"] = eva_input_ids
+        if eva_attention_mask is not None:
+            current_inputs["attention_mask"] = eva_attention_mask
 
         # Forward pass with image
         logits_final, hs_vis = forward_with_hidden_states(
@@ -128,10 +130,16 @@ def eva_decode_sample(
         if next_token_id.item() == processor.tokenizer.eos_token_id:
             break
 
-        # Append to sequence
+        # Append to sequence — also extend attention_mask to match new length
         eva_input_ids = torch.cat(
             [eva_input_ids, next_token_id.unsqueeze(0)], dim=1
         )
+        if eva_attention_mask is not None:
+            eva_attention_mask = torch.cat(
+                [eva_attention_mask,
+                 torch.ones(1, 1, device=eva_attention_mask.device, dtype=eva_attention_mask.dtype)],
+                dim=1,
+            )
 
     eva_answer = processor.tokenizer.decode(eva_generated, skip_special_tokens=True).strip()
 
