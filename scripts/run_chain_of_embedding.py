@@ -50,7 +50,7 @@ from chain_of_embedding.contrastive_forward import (
 from chain_of_embedding.models.gemma3 import load_gemma3, num_llm_layers
 from chain_of_embedding.tvi import compute_tvi, tvi_statistics
 from chain_of_embedding.vip import aggregate_vip, compute_layer_distances, detect_vip
-from data_loaders import load_vab, load_vilp, load_vlind_bench, load_vqav2, to_contrastive_sample
+from data_loaders import get_is_match, load_vab, load_vilp, load_vlind_bench, load_vqav2, to_contrastive_sample
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -135,6 +135,7 @@ def main():
     else:
         raise ValueError(f"Dataset {args.dataset!r} loader not yet implemented.")
     samples = [to_contrastive_sample(d) for d in raw]
+    is_match_fn = get_is_match(args.dataset)
 
     # --- Load model ---
     logger.info("Loading %s…", args.model)
@@ -184,7 +185,7 @@ def main():
         all_tvi.append(tvi)
         sample_ids.append(result.sample_id)
 
-        vis_dep = is_vision_dependent(result, ground_truth=sample.answer)
+        vis_dep = is_vision_dependent(result, ground_truth=sample.answer, is_match_fn=is_match_fn)
         is_vis_dep.append(float(vis_dep))
 
     logger.info("Processed %d / %d samples.", len(sample_ids), len(samples))

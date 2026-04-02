@@ -113,16 +113,21 @@ def _build_inputs_cf(sample: ContrastiveSample, processor, device: str) -> dict:
 
 
 @torch.no_grad()
-def _greedy_next_token(model, inputs: dict, processor) -> str:
-    """Run greedy decoding for a single next token. Returns the decoded string."""
+def _greedy_decode(model, inputs: dict, processor, max_new_tokens: int = 3) -> str:
+    """Run greedy decoding and return the decoded answer string.
+
+    Uses max_new_tokens=3 by default so multi-token answers (numbers, short words)
+    are captured correctly. Single-token decoding was insufficient for datasets like
+    VAB where answers can be multi-token, causing all samples to appear text-dependent.
+    """
     out = model.generate(
         **inputs,
-        max_new_tokens=1,
+        max_new_tokens=max_new_tokens,
         do_sample=False,
     )
-    # out shape: (1, input_len + 1); take the last token
-    new_token_id = out[0, -1].item()
-    return processor.tokenizer.decode([new_token_id], skip_special_tokens=True).strip()
+    # out shape: (1, input_len + max_new_tokens); decode only the new tokens
+    new_token_ids = out[0, inputs["input_ids"].shape[1]:]
+    return processor.tokenizer.decode(new_token_ids, skip_special_tokens=True).strip()
 
 
 @torch.no_grad()
@@ -199,12 +204,12 @@ def run_contrastive_forward(
     pred_blind = pred_vis = None
     if decode_answers:
         try:
-            pred_vis = _greedy_next_token(model, inputs_vis, processor)
+            pred_vis = _greedy_decode(model, inputs_vis, processor)
             blind_inputs = dict(inputs_vis)
             blind_inputs["pixel_values"] = torch.zeros_like(inputs_vis["pixel_values"])
-            pred_blind = _greedy_next_token(model, blind_inputs, processor)
+            pred_blind = _greedy_decode(model, blind_inputs, processor)
             if has_cf:
-                pred_cf = _greedy_next_token(model, inputs_cf, processor)
+                pred_cf = _greedy_decode(model, inputs_cf, processor)
         except Exception as e:
             logger.warning("Sample %s: greedy decode failed: %s", sample.id, e)
 
@@ -221,7 +226,11 @@ def run_contrastive_forward(
     )
 
 
-def is_vision_dependent(result: ContrastiveResult, ground_truth: str = "") -> bool:
+def is_vision_dependent(
+    result: ContrastiveResult,
+    ground_truth: str = "",
+    is_match_fn=None,
+) -> bool:
     """Classify a sample as vision-dependent (D_VT) or text-dependent (D_T).
 
     Following Long et al. Section 3.2: a sample is vision-dependent if the
@@ -229,11 +238,22 @@ def is_vision_dependent(result: ContrastiveResult, ground_truth: str = "") -> bo
 
     If ground_truth is provided, also checks that the visual answer is correct
     (strict D_VT definition). If not provided, uses only the change criterion.
+
+    Args:
+        result:       ContrastiveResult with pred_vis and pred_blind.
+        ground_truth: Expected correct answer string. If empty, only checks
+                      whether the answer changed.
+        is_match_fn:  Optional callable(pred, target) -> bool for dataset-specific
+                      answer matching (e.g. numeric normalisation for VAB).
+                      Defaults to case-insensitive exact match.
     """
     if result.pred_vis is None or result.pred_blind is None:
         return False
     answer_changed = result.pred_vis.lower() != result.pred_blind.lower()
     if not ground_truth:
         return answer_changed
-    vis_correct = result.pred_vis.lower() == ground_truth.lower()
+    if is_match_fn is not None:
+        vis_correct = is_match_fn(result.pred_vis, ground_truth)
+    else:
+        vis_correct = result.pred_vis.lower() == ground_truth.lower()
     return answer_changed and vis_correct

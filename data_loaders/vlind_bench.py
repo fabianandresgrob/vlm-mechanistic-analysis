@@ -30,8 +30,14 @@ logger = logging.getLogger(__name__)
 
 
 def is_match(pred: str, target: str) -> bool:
-    """Exact match after lowercase + strip (VLind-Bench answers are 'true'/'false')."""
-    return pred.strip().lower() == target.strip().lower()
+    """Match after lowercase + strip punctuation (VLind-Bench answers are 'true'/'false').
+
+    The model sometimes generates 'True.' or 'False.' with trailing punctuation;
+    strip those before comparing.
+    """
+    pred_norm = pred.strip().lower().rstrip(".,!?")
+    tgt_norm = target.strip().lower().rstrip(".,!?")
+    return pred_norm == tgt_norm
 
 
 # ---------------------------------------------------------------------------

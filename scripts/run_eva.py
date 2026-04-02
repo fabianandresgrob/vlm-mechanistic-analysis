@@ -29,7 +29,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chain_of_embedding.models.gemma3 import load_gemma3
-from data_loaders import load_vab, load_vqav2
+from data_loaders import load_vab, load_vilp, load_vlind_bench, load_vqav2
 from eva.js_divergence import (
     compute_layer_js_divergence,
     correlate_with_correctness,
@@ -79,7 +79,7 @@ def main():
     parser.add_argument(
         "--dataset",
         default="vqav2",
-        choices=["vqav2", "vlms_are_biased"],
+        choices=["vqav2", "vlms_are_biased", "vilp", "vlind"],
         help="Dataset to run on",
     )
     parser.add_argument("--n_samples", type=int, default=5000, help="Number of samples to process")
@@ -117,6 +117,10 @@ def main():
         samples = load_vab(
             dataset_id=args.vab_dataset_id, split=args.vab_split, n_samples=args.n_samples
         )
+    elif args.dataset == "vilp":
+        samples = load_vilp(n_samples=args.n_samples)
+    elif args.dataset == "vlind":
+        samples = load_vlind_bench(n_samples=args.n_samples)
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")
 
