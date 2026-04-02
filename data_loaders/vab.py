@@ -87,3 +87,68 @@ def load_vab(
 
     logger.info("Loaded %d VAB samples.", len(samples))
     return samples
+
+
+def load_vab_pairs(
+    dataset_id: str = "fabiangrob/vlms-bias-pairs",
+    split: str = "train",
+    n_samples: int | None = None,
+) -> list[dict]:
+    """Load VAB counterfactual pairs from ``fabiangrob/vlms-bias-pairs``.
+
+    Each sample has a paired original + modified image (subtle visual changes,
+    e.g. added leg, optical illusions) suitable for the full three-condition
+    chain-of-embedding analysis.
+
+    Field mapping:
+        id             → id
+        original_image → image   (condition B — original)
+        modified_image → cf_image (condition C — counterfactual)
+        prompt         → messages[0].content[1].text
+        ground_truth   → answer  (normalized: strip {}, lowercase)
+        expected_bias  → expected_bias
+        topic          → topic
+        sub_topic      → sub_topic
+
+    Args:
+        dataset_id: HuggingFace dataset repo ID.
+        split:      Dataset split (default: ``"train"``).
+        n_samples:  Maximum number of samples to return.  ``None`` = all.
+
+    Returns:
+        List of sample dicts with keys: id, image, cf_image, messages, answer,
+        expected_bias, topic, sub_topic.
+    """
+    from datasets import load_dataset  # HuggingFace datasets
+
+    logger.info("Loading VAB pairs from %s / %s…", dataset_id, split)
+    ds = load_dataset(dataset_id, split=split)
+    if n_samples is not None:
+        ds = ds.select(range(min(n_samples, len(ds))))
+
+    samples = []
+    for item in ds:
+        samples.append(
+            {
+                "id": item.get("id") or len(samples),
+                "image": item.get("original_image"),
+                "cf_image": item.get("modified_image"),
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image"},
+                            {"type": "text", "text": item.get("prompt") or ""},
+                        ],
+                    }
+                ],
+                "answer": _normalize(item.get("ground_truth") or ""),
+                "expected_bias": _normalize(item.get("expected_bias") or ""),
+                "topic": item.get("topic", ""),
+                "sub_topic": item.get("sub_topic", ""),
+            }
+        )
+
+    n_with_cf = sum(s["cf_image"] is not None for s in samples)
+    logger.info("Loaded %d VAB pair samples (%d with cf images).", len(samples), n_with_cf)
+    return samples

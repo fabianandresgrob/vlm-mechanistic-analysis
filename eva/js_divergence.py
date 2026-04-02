@@ -52,12 +52,15 @@ def jensen_shannon_divergence(
     return jsd.clamp(min=0.0)  # numerical guard against tiny negatives
 
 
-def _build_inputs(sample: dict, processor, device: str) -> dict:
+def _build_inputs(sample: dict, processor, device: str, image_override=None) -> dict:
     """Build processor inputs from a sample dict.
 
     Sample dict must have:
         - 'image': PIL Image or None
         - 'messages': list in Gemma 3 chat format (with image token in content)
+
+    Args:
+        image_override: If provided, use this image instead of sample['image'].
 
     Returns processor output moved to `device`.
     """
@@ -66,7 +69,8 @@ def _build_inputs(sample: dict, processor, device: str) -> dict:
         add_generation_prompt=True,
         tokenize=False,
     )
-    images = [sample["image"]] if sample.get("image") is not None else None
+    image = image_override if image_override is not None else sample.get("image")
+    images = [image] if image is not None else None
     inputs = processor(text=text, images=images, return_tensors="pt")
     return {k: v.to(device) for k, v in inputs.items()}
 
@@ -188,6 +192,119 @@ def compute_layer_js_divergence(
 
     if output_dir:
         np.savez(os.path.join(output_dir, "js_per_layer.npz"), **result)
+
+    return result
+
+
+@torch.no_grad()
+def compute_cf_js_divergence(
+    model,
+    processor,
+    samples: list[dict],
+    target_token_position: str = "last",
+    device: str = "cuda",
+    output_dir: Optional[str] = None,
+    resume: bool = False,
+) -> dict:
+    """Compute per-layer JS divergence between original and counterfactual image.
+
+    For each sample, performs two forward passes:
+      1. Original:        with sample['image']
+      2. Counterfactual:  with sample['cf_image']
+
+    Samples without a cf_image are skipped.
+
+    This measures *discriminability*: at which layers does the model's output
+    distribution actually distinguish the two images? Complementary to the
+    chain-of-embedding d_disc metric (which operates in hidden-state space).
+
+    Args:
+        model: Loaded Gemma3ForConditionalGeneration.
+        processor: Corresponding AutoProcessor.
+        samples: List of dicts with 'image', 'cf_image', 'messages'.
+        target_token_position: 'last' (last input token position).
+        device: Device string.
+        output_dir: If set, saves results there.
+        resume: If True and output_dir set, skips already-processed samples.
+
+    Returns:
+        dict with keys:
+            'js_per_layer':  np.ndarray of shape [num_samples, num_layers]
+            'mean_js':       np.ndarray of shape [num_layers]
+            'std_js':        np.ndarray of shape [num_layers]
+            'sample_ids':    np.ndarray of length num_samples
+    """
+    n_layers = num_llm_layers(model)
+    all_js: list[np.ndarray] = []
+    sample_ids: list = []
+
+    done_ids: set = set()
+    if resume and output_dir:
+        cache_path = os.path.join(output_dir, "js_cf_disc.npz")
+        if os.path.exists(cache_path):
+            cached = np.load(cache_path, allow_pickle=True)
+            done_ids = set(cached["sample_ids"].tolist())
+            logger.info("Resuming CF disc: %d samples already cached.", len(done_ids))
+
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    n_skipped_no_cf = 0
+    for idx, sample in enumerate(tqdm(samples, desc="EVA CF discriminability")):
+        sample_id = sample.get("id", idx)
+        if sample_id in done_ids:
+            continue
+        if sample.get("cf_image") is None:
+            n_skipped_no_cf += 1
+            continue
+
+        try:
+            inputs_vis = _build_inputs(sample, processor, device)
+            inputs_cf = _build_inputs(sample, processor, device, image_override=sample["cf_image"])
+        except Exception as e:
+            logger.warning("Sample %s: failed to build inputs: %s", sample_id, e)
+            continue
+
+        try:
+            _, hs_vis = forward_with_hidden_states(model, inputs_vis, include_image=True)
+            _, hs_cf = forward_with_hidden_states(model, inputs_cf, include_image=True)
+        except Exception as e:
+            logger.warning("Sample %s: forward pass failed: %s", sample_id, e)
+            continue
+
+        js_layers = []
+        for layer_i in range(n_layers):
+            h_vis = hs_vis[layer_i + 1][:, -1, :]   # (1, hidden_dim)
+            h_cf = hs_cf[layer_i + 1][:, -1, :]
+
+            logits_vis = early_exit_logits(model, h_vis)
+            logits_cf = early_exit_logits(model, h_cf)
+
+            p_vis = F.softmax(logits_vis, dim=-1)
+            p_cf = F.softmax(logits_cf, dim=-1)
+
+            jsd = jensen_shannon_divergence(p_vis, p_cf)
+            js_layers.append(jsd.item())
+
+        all_js.append(np.array(js_layers, dtype=np.float32))
+        sample_ids.append(sample_id)
+
+    if n_skipped_no_cf:
+        logger.info("Skipped %d samples without cf_image.", n_skipped_no_cf)
+
+    if not all_js:
+        raise RuntimeError("No samples with cf_image were successfully processed.")
+
+    js_per_layer = np.stack(all_js, axis=0)
+    result = {
+        "js_per_layer": js_per_layer,
+        "mean_js": np.nanmean(js_per_layer, axis=0),
+        "std_js": np.nanstd(js_per_layer, axis=0),
+        "sample_ids": np.array(sample_ids, dtype=object),
+    }
+
+    if output_dir:
+        np.savez(os.path.join(output_dir, "js_cf_disc.npz"), **result)
 
     return result
 

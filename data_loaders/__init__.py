@@ -29,7 +29,7 @@ the HuggingFace ``datasets`` library.  Import as shown above.
 """
 
 from .vab import is_match as vab_is_match
-from .vab import load_vab
+from .vab import load_vab, load_vab_pairs
 from .vilp import is_match as vilp_is_match
 from .vilp import load_vilp
 from .vlind_bench import expand_vlind_bench_stages, load_vlind_bench
@@ -41,6 +41,7 @@ def get_is_match(dataset: str):
     """Return the correct is_match function for the given dataset name."""
     return {
         "vlms_are_biased": vab_is_match,
+        "vab_pairs": vab_is_match,
         "vilp": vilp_is_match,
         "vlind": vlind_is_match,
         "vqav2": lambda p, t: p.strip().lower() == t.strip().lower(),
@@ -62,6 +63,7 @@ def to_contrastive_sample(d: dict):
 
 __all__ = [
     "load_vab",
+    "load_vab_pairs",
     "load_vilp",
     "load_vlind_bench",
     "expand_vlind_bench_stages",

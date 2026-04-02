@@ -29,8 +29,9 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chain_of_embedding.models.gemma3 import load_gemma3
-from data_loaders import load_vab, load_vilp, load_vlind_bench, load_vqav2
+from data_loaders import load_vab, load_vab_pairs, load_vilp, load_vlind_bench, load_vqav2
 from eva.js_divergence import (
+    compute_cf_js_divergence,
     compute_layer_js_divergence,
     correlate_with_correctness,
     find_peak_layer,
@@ -79,7 +80,7 @@ def main():
     parser.add_argument(
         "--dataset",
         default="vqav2",
-        choices=["vqav2", "vlms_are_biased", "vilp", "vlind"],
+        choices=["vqav2", "vlms_are_biased", "vab_pairs", "vilp", "vlind"],
         help="Dataset to run on",
     )
     parser.add_argument("--n_samples", type=int, default=5000, help="Number of samples to process")
@@ -87,6 +88,15 @@ def main():
     parser.add_argument("--device", default="cuda", help="Device: 'cuda', 'cpu', or 'auto'")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size (currently only 1 supported)")
     parser.add_argument("--resume", action="store_true", help="Skip already-processed samples")
+    parser.add_argument(
+        "--mode",
+        default="standard",
+        choices=["standard", "cf_disc"],
+        help=(
+            "standard: JS(p_vis, p_blind) — original EVA methodology. "
+            "cf_disc: JS(p_vis, p_cf) — discriminability between original and CF image."
+        ),
+    )
     parser.add_argument(
         "--lmms_results",
         default=None,
@@ -117,6 +127,8 @@ def main():
         samples = load_vab(
             dataset_id=args.vab_dataset_id, split=args.vab_split, n_samples=args.n_samples
         )
+    elif args.dataset == "vab_pairs":
+        samples = load_vab_pairs(n_samples=args.n_samples)
     elif args.dataset == "vilp":
         samples = load_vilp(n_samples=args.n_samples)
     elif args.dataset == "vlind":
@@ -146,57 +158,93 @@ def main():
     logger.info("Loading model %s on %s…", args.model, args.device)
     model, processor = load_gemma3(model_id=args.model, device=args.device)
 
-    # --- Run JS divergence computation ---
-    logger.info("Computing layer-wise JS divergence…")
-    result = compute_layer_js_divergence(
-        model=model,
-        processor=processor,
-        samples=samples,
-        target_token_position="last",
-        device=args.device if args.device != "auto" else "cuda",
-        batch_size=args.batch_size,
-        output_dir=output_dir,
-        resume=args.resume,
-    )
+    device_str = args.device if args.device != "auto" else "cuda"
 
-    js_per_layer = result["js_per_layer"]    # (n_samples, n_layers)
-    mean_js = result["mean_js"]              # (n_layers,)
-    is_correct = result["is_correct"]
+    if args.mode == "cf_disc":
+        # --- CF discriminability: JS(p_vis, p_cf) ---
+        logger.info("Computing CF discriminability JS divergence (JS(p_vis, p_cf))…")
+        result = compute_cf_js_divergence(
+            model=model,
+            processor=processor,
+            samples=samples,
+            target_token_position="last",
+            device=device_str,
+            output_dir=output_dir,
+            resume=args.resume,
+        )
 
-    # --- Analysis ---
-    peak_layer = find_peak_layer(mean_js)
-    n_layers = mean_js.shape[0]
+        js_per_layer = result["js_per_layer"]
+        mean_js = result["mean_js"]
+        n_layers = mean_js.shape[0]
+        peak_layer = find_peak_layer(mean_js)
 
-    logger.info("Peak JS divergence layer: %d (of %d)", peak_layer, n_layers)
+        summary = {
+            "model_id": args.model,
+            "dataset": args.dataset,
+            "mode": "cf_disc",
+            "n_samples_processed": int(js_per_layer.shape[0]),
+            "n_layers": n_layers,
+            "peak_layer": peak_layer,
+            "mean_js_curve": mean_js.tolist(),
+            "std_js_curve": result["std_js"].tolist(),
+        }
+        summary_path = os.path.join(output_dir, "summary_cf_disc.json")
+        with open(summary_path, "w") as f:
+            json.dump(summary, f, indent=2)
+        logger.info("Saved CF disc summary to %s", summary_path)
 
-    # Spearman correlations at key layers
-    correlations = {}
-    for li in [peak_layer, peak_layer - 2, peak_layer + 2]:
-        if 0 <= li < n_layers and not np.all(np.isnan(is_correct)):
-            rho, pval = correlate_with_correctness(js_per_layer, is_correct, li)
-            correlations[f"layer_{li}"] = {"rho": rho, "pvalue": pval}
+        print(f"\n[CF discriminability] Peak JS(p_vis, p_cf) layer: {peak_layer} (of {n_layers})")
+        print(f"Mean JS at peak layer: {mean_js[peak_layer]:.4f} bits")
 
-    # --- Save summary ---
-    summary = {
-        "model_id": args.model,
-        "dataset": args.dataset,
-        "n_samples_processed": int(js_per_layer.shape[0]),
-        "n_layers": n_layers,
-        "peak_layer": peak_layer,
-        "mean_js_curve": mean_js.tolist(),
-        "std_js_curve": result["std_js"].tolist(),
-        "correctness_correlations": correlations,
-    }
-    summary_path = os.path.join(output_dir, "summary.json")
-    with open(summary_path, "w") as f:
-        json.dump(summary, f, indent=2)
-    logger.info("Saved summary to %s", summary_path)
+    else:
+        # --- Standard EVA: JS(p_vis, p_blind) ---
+        logger.info("Computing layer-wise JS divergence (standard EVA)…")
+        result = compute_layer_js_divergence(
+            model=model,
+            processor=processor,
+            samples=samples,
+            target_token_position="last",
+            device=device_str,
+            batch_size=args.batch_size,
+            output_dir=output_dir,
+            resume=args.resume,
+        )
 
-    print(f"\nPeak JS divergence layer: {peak_layer} (of {n_layers})")
-    print(f"Mean JS at peak layer: {mean_js[peak_layer]:.4f} bits")
-    if correlations:
-        for k, v in correlations.items():
-            print(f"  Spearman rho at {k}: {v['rho']:.3f} (p={v['pvalue']:.3e})")
+        js_per_layer = result["js_per_layer"]
+        mean_js = result["mean_js"]
+        is_correct = result["is_correct"]
+        n_layers = mean_js.shape[0]
+        peak_layer = find_peak_layer(mean_js)
+
+        logger.info("Peak JS divergence layer: %d (of %d)", peak_layer, n_layers)
+
+        correlations = {}
+        for li in [peak_layer, peak_layer - 2, peak_layer + 2]:
+            if 0 <= li < n_layers and not np.all(np.isnan(is_correct)):
+                rho, pval = correlate_with_correctness(js_per_layer, is_correct, li)
+                correlations[f"layer_{li}"] = {"rho": rho, "pvalue": pval}
+
+        summary = {
+            "model_id": args.model,
+            "dataset": args.dataset,
+            "mode": "standard",
+            "n_samples_processed": int(js_per_layer.shape[0]),
+            "n_layers": n_layers,
+            "peak_layer": peak_layer,
+            "mean_js_curve": mean_js.tolist(),
+            "std_js_curve": result["std_js"].tolist(),
+            "correctness_correlations": correlations,
+        }
+        summary_path = os.path.join(output_dir, "summary.json")
+        with open(summary_path, "w") as f:
+            json.dump(summary, f, indent=2)
+        logger.info("Saved summary to %s", summary_path)
+
+        print(f"\nPeak JS divergence layer: {peak_layer} (of {n_layers})")
+        print(f"Mean JS at peak layer: {mean_js[peak_layer]:.4f} bits")
+        if correlations:
+            for k, v in correlations.items():
+                print(f"  Spearman rho at {k}: {v['rho']:.3f} (p={v['pvalue']:.3e})")
 
 
 if __name__ == "__main__":

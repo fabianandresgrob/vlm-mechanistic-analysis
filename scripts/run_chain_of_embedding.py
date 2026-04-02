@@ -50,7 +50,7 @@ from chain_of_embedding.contrastive_forward import (
 from chain_of_embedding.models.gemma3 import load_gemma3, num_llm_layers
 from chain_of_embedding.tvi import compute_tvi, tvi_statistics
 from chain_of_embedding.vip import aggregate_vip, compute_layer_distances, detect_vip
-from data_loaders import get_is_match, load_vab, load_vilp, load_vlind_bench, load_vqav2, to_contrastive_sample
+from data_loaders import get_is_match, load_vab, load_vab_pairs, load_vilp, load_vlind_bench, load_vqav2, to_contrastive_sample
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -94,7 +94,7 @@ def main():
     parser.add_argument("--model", default="google/gemma-3-4b-it")
     parser.add_argument(
         "--dataset", default="vlms_are_biased",
-        choices=["vqav2", "vlms_are_biased", "vilp", "vlind"],
+        choices=["vqav2", "vlms_are_biased", "vab_pairs", "vilp", "vlind"],
     )
     parser.add_argument("--vab_dataset_id", default="anvo25/vlms-are-biased")
     parser.add_argument("--vab_split", default="main")
@@ -128,6 +128,8 @@ def main():
         raw = load_vqav2(n_samples=n)
     elif args.dataset == "vlms_are_biased":
         raw = load_vab(dataset_id=args.vab_dataset_id, split=args.vab_split, n_samples=n)
+    elif args.dataset == "vab_pairs":
+        raw = load_vab_pairs(n_samples=n)
     elif args.dataset == "vilp":
         raw = load_vilp(n_samples=n)
     elif args.dataset == "vlind":
