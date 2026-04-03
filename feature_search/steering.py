@@ -81,11 +81,11 @@ def steering_hook(
     def hook_fn(module, input, output):
         if isinstance(output, tuple):
             hidden_states = output[0]
-            _sv = sv.to(hidden_states.device)
+            _sv = sv.to(device=hidden_states.device, dtype=hidden_states.dtype)
             hidden_states = hidden_states + _sv.unsqueeze(0).unsqueeze(0)
             return (hidden_states,) + output[1:]
         else:
-            _sv = sv.to(output.device)
+            _sv = sv.to(device=output.device, dtype=output.dtype)
             return output + _sv.unsqueeze(0).unsqueeze(0)
 
     handle = layer_module.register_forward_hook(hook_fn)
