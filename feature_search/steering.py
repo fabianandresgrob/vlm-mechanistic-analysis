@@ -66,7 +66,10 @@ def steering_hook(
         steering_vector:  Shape (d_in,). Added to hidden state.
         alpha:            Scaling factor.
     """
-    layer_module = model.model.layers[target_layer]
+    if hasattr(model, "language_model"):
+        layer_module = model.language_model.model.layers[target_layer]
+    else:
+        layer_module = model.model.layers[target_layer]
     sv = steering_vector * alpha  # move device resolution into hook_fn
 
     def hook_fn(module, input, output):
