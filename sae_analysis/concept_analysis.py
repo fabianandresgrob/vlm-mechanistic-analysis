@@ -69,7 +69,11 @@ def encode_texts(
         inputs = processor(
             text=prompts, return_tensors="pt", padding=True, truncation=True
         ).to(device)
-        emb = model.get_text_features(**inputs)
+        text_out = model.text_model(
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs["attention_mask"],
+        )
+        emb = model.text_projection(text_out.pooler_output)
         emb = emb / emb.norm(dim=-1, keepdim=True)
         all_embeddings.append(emb.cpu().float().numpy())
     return np.concatenate(all_embeddings, axis=0)
@@ -92,7 +96,8 @@ def encode_images(
     for i in tqdm(range(0, len(images), batch_size), desc="Encoding images", leave=False):
         batch = images[i : i + batch_size]
         inputs = processor(images=batch, return_tensors="pt").to(device)
-        emb = model.get_image_features(**inputs)
+        vision_out = model.vision_model(pixel_values=inputs["pixel_values"])
+        emb = model.visual_projection(vision_out.pooler_output)
         emb = emb / emb.norm(dim=-1, keepdim=True)
         all_embeddings.append(emb.cpu().float().numpy())
     return np.concatenate(all_embeddings, axis=0)
