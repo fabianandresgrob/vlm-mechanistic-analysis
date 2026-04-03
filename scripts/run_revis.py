@@ -46,7 +46,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chain_of_embedding.models.gemma3 import load_gemma3
-from data_loaders import load_vab, load_vqav2
+from data_loaders import load_vab, load_vilp, load_vlind_bench, load_vqav2
 from feature_search.steering import steering_hook, steered_generate
 from revis.vector_calculator import compute_revis_vector
 
@@ -64,8 +64,12 @@ def load_calibration_samples(dataset: str, n_samples: int) -> list[dict]:
         return load_vab(n_samples=n_samples)
     elif dataset == "vqav2":
         return load_vqav2(n_samples=n_samples)
+    elif dataset == "vilp":
+        return load_vilp(n_samples=n_samples)
+    elif dataset == "vlind":
+        return load_vlind_bench(n_samples=n_samples)
     else:
-        raise ValueError(f"Unknown dataset: {dataset!r}. Choose 'vab' or 'vqav2'.")
+        raise ValueError(f"Unknown dataset: {dataset!r}. Choose 'vab', 'vqav2', 'vilp', or 'vlind'.")
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +196,7 @@ def main():
     parser.add_argument("--mode", choices=["extract", "steer", "both"], default="both")
     parser.add_argument("--model", default="google/gemma-3-4b-it")
     parser.add_argument("--layer", type=int, required=True, help="Target LLM layer (0-based)")
-    parser.add_argument("--dataset", default="vab", choices=["vab", "vqav2"])
+    parser.add_argument("--dataset", default="vab", choices=["vab", "vqav2", "vilp", "vlind"])
     parser.add_argument("--n_calib", type=int, default=100, help="Calibration samples for vector extraction")
     parser.add_argument("--n_samples", type=int, default=240, help="Evaluation samples for steering")
     parser.add_argument("--alphas", default="-200,-100,-50,0,50,100,200",
