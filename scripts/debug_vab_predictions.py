@@ -47,11 +47,24 @@ def _build_text_only_inputs(sample, processor, device: str) -> dict:
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--n_samples", type=int, default=30)
+    p.add_argument("--n_per_topic", type=int, default=5,
+                   help="Number of samples to take per topic (stratified)")
     p.add_argument("--device", default="cuda")
     p.add_argument("--model", default="google/gemma-3-4b-it")
     p.add_argument("--max_new_tokens", type=int, default=5)
     return p.parse_args()
+
+
+def _stratified_sample(raw: list[dict], n_per_topic: int) -> list[dict]:
+    """Take up to n_per_topic samples from each unique topic."""
+    from collections import defaultdict
+    buckets: dict[str, list] = defaultdict(list)
+    for s in raw:
+        buckets[s.get("topic", "unknown")].append(s)
+    result = []
+    for topic, items in sorted(buckets.items()):
+        result.extend(items[:n_per_topic])
+    return result
 
 
 def main():
@@ -61,24 +74,25 @@ def main():
     model, processor = load_gemma3(args.model, device=args.device)
     is_match_fn = get_is_match("vlms_are_biased")
 
-    print(f"Loading {args.n_samples} VAB samples…")
-    raw = load_vab(n_samples=args.n_samples)
+    print(f"Loading VAB (stratified: {args.n_per_topic} per topic)…")
+    raw_all = load_vab()
+    raw = _stratified_sample(raw_all, args.n_per_topic)
     samples = [to_contrastive_sample(d) for d in raw]
+    print(f"Selected {len(samples)} samples across {len(set(s.get('topic') for s in raw))} topics\n")
 
-    counts = {"vis_only": 0, "blank_only": 0, "text_only": 0, "all_same": 0, "mixed": 0}
-    n_dvt_blank = 0   # changed vis vs blank AND vis correct (current definition)
-    n_dvt_text  = 0   # changed vis vs text-only AND vis correct
+    from collections import defaultdict
+    n_dvt_blank = 0
+    n_dvt_text  = 0
+    # per-topic: counts of (vis==blank, vis==text, vis_correct)
+    topic_stats: dict[str, dict] = defaultdict(lambda: {"n": 0, "vis_eq_blank": 0, "vis_eq_text": 0, "vis_correct": 0, "text_correct": 0})
 
-    print(f"\n{'ID':<5} {'Topic':<18} {'GT':<6} {'vis':<8} {'blank':<8} {'text':<8} {'match_fn_ok'}")
-    print("-" * 70)
+    print(f"{'Topic':<22} {'GT':<6} {'vis':<8} {'blank':<8} {'text':<8} {'vis_ok':<7} {'flags'}")
+    print("-" * 78)
 
     for raw_s, sample in zip(raw, samples):
-        inputs_vis = _build_inputs(sample, processor, args.device)
-
-        inputs_blank = dict(inputs_vis)
-        inputs_blank["pixel_values"] = torch.zeros_like(inputs_vis["pixel_values"])
-
-        inputs_text = _build_text_only_inputs(sample, processor, args.device)
+        inputs_vis   = _build_inputs(sample, processor, args.device)
+        inputs_blank = {**inputs_vis, "pixel_values": torch.zeros_like(inputs_vis["pixel_values"])}
+        inputs_text  = _build_text_only_inputs(sample, processor, args.device)
 
         pred_vis   = _greedy_decode(model, inputs_vis,   processor, args.max_new_tokens)
         pred_blank = _greedy_decode(model, inputs_blank, processor, args.max_new_tokens)
@@ -86,30 +100,41 @@ def main():
 
         gt     = raw_s.get("answer", "")
         vis_ok = is_match_fn(pred_vis, gt)
+        txt_ok = is_match_fn(pred_text, gt)
 
         changed_blank = pred_vis.lower().strip() != pred_blank.lower().strip()
         changed_text  = pred_vis.lower().strip() != pred_text.lower().strip()
 
-        if changed_blank and vis_ok:
-            n_dvt_blank += 1
-        if changed_text and vis_ok:
-            n_dvt_text += 1
+        if changed_blank and vis_ok: n_dvt_blank += 1
+        if changed_text  and vis_ok: n_dvt_text  += 1
 
-        topic = raw_s.get("topic", "")[:16]
+        topic = raw_s.get("topic", "unknown")
+        ts = topic_stats[topic]
+        ts["n"]            += 1
+        ts["vis_eq_blank"] += int(not changed_blank)
+        ts["vis_eq_text"]  += int(not changed_text)
+        ts["vis_correct"]  += int(vis_ok)
+        ts["text_correct"] += int(txt_ok)
+
         flags = []
         if changed_blank: flags.append("vis≠blank")
         if changed_text:  flags.append("vis≠text")
-        print(f"{str(raw_s.get('id','')):<5} {topic:<18} {gt:<6} {pred_vis:<8} {pred_blank:<8} {pred_text:<8} {str(vis_ok):<5}  {' '.join(flags)}")
+        print(f"{topic:<22} {gt:<6} {pred_vis:<8} {pred_blank:<8} {pred_text:<8} {str(vis_ok):<7} {' '.join(flags)}")
 
-    print("\n" + "=" * 70)
-    print(f"Over {len(samples)} samples:")
-    print(f"  D_VT (vis≠blank AND vis_correct): {n_dvt_blank}  ← current chain-of-embedding definition")
-    print(f"  D_VT (vis≠text  AND vis_correct): {n_dvt_text}   ← text-only blind condition")
-    print()
-    print("If vis==blank==text on everything: model output is fully text-determined,")
-    print("image tokens (even blank ones) have zero effect on the generated answer.")
-    print("If vis==blank but vis≠text: blank image acts like text-only — SigLIP black")
-    print("image tokens are being ignored, but prompt structure differs.")
+    print("\n" + "=" * 78)
+    print(f"\nPer-topic summary ({args.n_per_topic} samples each):")
+    print(f"  {'Topic':<22} {'n':>3}  {'vis=blank':>9}  {'vis=text':>8}  {'vis_acc':>7}  {'text_acc':>8}")
+    print("  " + "-" * 65)
+    for topic, ts in sorted(topic_stats.items()):
+        n = ts["n"]
+        print(f"  {topic:<22} {n:>3}  "
+              f"{ts['vis_eq_blank']:>4}/{n} ({100*ts['vis_eq_blank']/n:4.0f}%)  "
+              f"{ts['vis_eq_text']:>4}/{n} ({100*ts['vis_eq_text']/n:4.0f}%)  "
+              f"{ts['vis_correct']:>4}/{n} ({100*ts['vis_correct']/n:4.0f}%)  "
+              f"{ts['text_correct']:>4}/{n} ({100*ts['text_correct']/n:4.0f}%)")
+
+    print(f"\nOverall D_VT (vis≠blank AND vis_correct): {n_dvt_blank}")
+    print(f"Overall D_VT (vis≠text  AND vis_correct): {n_dvt_text}")
 
 
 if __name__ == "__main__":
