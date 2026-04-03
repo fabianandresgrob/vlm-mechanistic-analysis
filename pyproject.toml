@@ -52,6 +52,7 @@ packages = [
     "vti",
     "sae_convergence",
     "feature_search",
+    "sae_analysis",
     "scripts",
     "analysis",
 ]
