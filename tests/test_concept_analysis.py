@@ -79,11 +79,12 @@ class TestBuildVocabulary:
         assert "apple" in concepts
         assert "table" in concepts
 
-    def test_extracts_vilp_question_nouns(self):
+    def test_extracts_vilp_single_word_answers(self):
         samples = {"vilp": _make_samples_vilp()}
         concepts, sources = build_vocabulary(samples)
-        # "dogs", "car", "color" should be extracted from questions
-        assert any(w in concepts for w in ("dogs", "dog", "car", "color"))
+        # ViLP single-word answers ("three", "red") are the visual concepts being tested
+        assert "three" in concepts
+        assert "red" in concepts
 
     def test_includes_imagenet_classes(self):
         samples = {}
@@ -222,8 +223,9 @@ class TestKLDivergence:
             assert kl_divergence(p, q) >= 0
 
     def test_asymmetric(self):
-        p = np.array([0.9, 0.1])
-        q = np.array([0.1, 0.9])
+        # Mirror-image pairs give equal KL — use truly non-symmetric distributions
+        p = np.array([0.7, 0.2, 0.1])
+        q = np.array([0.1, 0.6, 0.3])
         assert kl_divergence(p, q) != pytest.approx(kl_divergence(q, p), abs=0.01)
 
 

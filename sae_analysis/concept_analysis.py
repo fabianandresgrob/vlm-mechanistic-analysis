@@ -14,7 +14,6 @@ iNaturalist), motivating different training data choices for WS3.
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 
 import numpy as np
@@ -101,23 +100,6 @@ def encode_images(
 
 # ─── Vocabulary building ──────────────────────────────────────────────────────
 
-_STOPWORDS = {
-    "a", "an", "the", "is", "in", "on", "at", "to", "for", "of", "and",
-    "or", "with", "this", "that", "are", "was", "it", "be", "as", "by",
-    "please", "answer", "one", "word", "how", "many", "what", "which",
-    "image", "picture", "photo", "shown", "does", "do", "have", "has",
-    "there", "from", "based", "given", "only", "respond", "true", "false",
-    "statement", "forget", "real", "world", "common", "sense", "just",
-    "follow", "information", "provided", "not", "but", "its", "if",
-}
-
-
-def _extract_nouns_simple(text: str) -> list[str]:
-    """Extract candidate concept words from text (no NLP dependency needed)."""
-    words = re.findall(r"\b[a-zA-Z]{3,}\b", text.lower())
-    return [w for w in words if w not in _STOPWORDS]
-
-
 def build_vocabulary(
     benchmark_samples: dict[str, list[dict]],
     imagenet_classes: list[str] | None = None,
@@ -150,19 +132,14 @@ def build_vocabulary(
 
     for dataset_name, samples in benchmark_samples.items():
         for s in samples:
+            # Structured metadata fields (clean signal, always extracted)
             for field in ("topic", "sub_topic"):
                 if s.get(field):
                     _add(s[field], dataset_name)
             for field in ("concept", "existent_noun", "non_existent_noun"):
                 if s.get(field):
                     _add(s[field], dataset_name)
-            # Extract nouns from question text
-            for msg in s.get("messages", []):
-                for content in msg.get("content", []):
-                    if isinstance(content, dict) and content.get("type") == "text":
-                        for noun in _extract_nouns_simple(content["text"]):
-                            _add(noun, dataset_name)
-            # Single-word answers (ViLP answers are object/count words)
+            # Single-word answers — the visual concept being tested (e.g. ViLP: "dog", "three", "red")
             ans = s.get("answer", "")
             if ans and len(ans.split()) == 1 and ans.isalpha():
                 _add(ans, dataset_name)
