@@ -66,8 +66,14 @@ def steering_hook(
         steering_vector:  Shape (d_in,). Added to hidden state.
         alpha:            Scaling factor.
     """
-    if hasattr(model, "language_model"):
+    # Gemma3ForConditionalGeneration layer path varies by transformers version:
+    #   model.language_model.model.layers  (some versions)
+    #   model.model.language_model.layers  (other versions)
+    #   model.model.layers                 (plain causal LM)
+    if hasattr(model, "language_model") and hasattr(model.language_model, "model"):
         layer_module = model.language_model.model.layers[target_layer]
+    elif hasattr(model, "model") and hasattr(model.model, "language_model"):
+        layer_module = model.model.language_model.layers[target_layer]
     else:
         layer_module = model.model.layers[target_layer]
     sv = steering_vector * alpha  # move device resolution into hook_fn
