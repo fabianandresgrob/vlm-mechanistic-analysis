@@ -140,8 +140,10 @@ def build_vocabulary(
                 if s.get(field):
                     _add(s[field], dataset_name)
             # Single-word answers — the visual concept being tested (e.g. ViLP: "dog", "three", "red")
+            # Exclude boolean/trivial answers that are not visual concepts
+            _ANSWER_BLOCKLIST = {"yes", "no", "true", "false", "none", "other"}
             ans = s.get("answer", "")
-            if ans and len(ans.split()) == 1 and ans.isalpha():
+            if ans and len(ans.split()) == 1 and ans.isalpha() and ans not in _ANSWER_BLOCKLIST:
                 _add(ans, dataset_name)
 
     if imagenet_classes:
