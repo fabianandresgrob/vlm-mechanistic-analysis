@@ -104,7 +104,7 @@ def main():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     model_slug = args.model.replace("/", "_")
     base_output_dir = os.path.join(repo_root, args.output_dir, model_slug,
-                                   f"layer_{args.target_layer}")
+                                   args.dataset, f"layer_{args.target_layer}")
     os.makedirs(base_output_dir, exist_ok=True)
 
     alphas = [float(a) for a in args.alpha_sweep.split(",")]
