@@ -25,7 +25,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chain_of_embedding.models.gemma3 import load_gemma3
-from data_loaders import load_vqav2
+from data_loaders import load_vqav2, load_vab, load_vilp, load_vlind_bench
 from feature_search.sae_utils import load_sae, extract_answer_token_acts
 from feature_search.contrastive_search import separation_scores
 
@@ -44,7 +44,10 @@ def main():
                         choices=["16k", "262k"])
     parser.add_argument("--l0_level", default="big",
                         choices=["small", "big"])
-    parser.add_argument("--n_samples", type=int, default=5000)
+    parser.add_argument("--dataset", default="vqav2",
+                        choices=["vqav2", "vab", "vilp", "vlind"])
+    parser.add_argument("--n_samples", type=int, default=None,
+                        help="Samples to use (default: 5000 for vqav2, all for others)")
     parser.add_argument("--noise_threshold", type=float, default=0.02)
     parser.add_argument("--output_dir", default="results/feature_search/")
     parser.add_argument("--device", default="cuda")
@@ -53,7 +56,7 @@ def main():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     model_slug = args.model.replace("/", "_")
     output_dir = os.path.join(
-        repo_root, args.output_dir, model_slug, f"layer_{args.target_layer}"
+        repo_root, args.output_dir, model_slug, args.dataset, f"layer_{args.target_layer}"
     )
     os.makedirs(output_dir, exist_ok=True)
 
@@ -66,8 +69,10 @@ def main():
         logger.info("Loading model %s…", args.model)
         model, processor = load_gemma3(args.model, device=args.device)
 
-        logger.info("Loading %d VQAv2 samples…", args.n_samples)
-        samples = load_vqav2(n_samples=args.n_samples)
+        n = args.n_samples if args.n_samples is not None else (5000 if args.dataset == "vqav2" else None)
+        loaders = {"vqav2": load_vqav2, "vab": load_vab, "vilp": load_vilp, "vlind": load_vlind_bench}
+        samples = loaders[args.dataset](n_samples=n)
+        logger.info("Loaded %d samples from %s", len(samples), args.dataset)
 
         logger.info("Extracting activations at layer %d…", args.target_layer)
         acts_vis, acts_blind = extract_answer_token_acts(

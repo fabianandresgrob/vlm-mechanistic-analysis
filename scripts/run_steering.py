@@ -31,7 +31,7 @@ import argparse, json, logging, os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chain_of_embedding.models.gemma3 import load_gemma3
-from data_loaders import load_vab as _load_vab
+from data_loaders import load_vab, load_vilp, load_vlind_bench, get_is_match
 from feature_search.sae_utils import load_sae
 from feature_search.steering import get_steering_vector, steered_generate
 
@@ -39,13 +39,21 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 
-def load_vab(dataset_id, split, n_samples):
-    return _load_vab(dataset_id=dataset_id, split=split, n_samples=n_samples)
+def load_dataset(dataset: str, n_samples: int) -> list[dict]:
+    if dataset == "vab":
+        return load_vab(n_samples=n_samples)
+    elif dataset == "vilp":
+        return load_vilp(n_samples=n_samples)
+    elif dataset == "vlind":
+        return load_vlind_bench(n_samples=n_samples)
+    else:
+        raise ValueError(f"Unknown dataset: {dataset!r}")
 
 
 def run_one_latent_alpha(model, processor, samples, target_layer,
                           steering_vector, alpha, output_dir, device,
-                          vanilla_cache: dict | None = None):
+                          vanilla_cache: dict | None = None,
+                          is_match_fn=None):
     import jsonlines
     from tqdm import tqdm
     results = []
@@ -53,7 +61,8 @@ def run_one_latent_alpha(model, processor, samples, target_layer,
         try:
             r = steered_generate(model, processor, sample, target_layer,
                                   steering_vector, alpha, device,
-                                  precomputed_vanilla=vanilla_cache.get(sample.get("id")) if vanilla_cache else None)
+                                  precomputed_vanilla=vanilla_cache.get(sample.get("id")) if vanilla_cache else None,
+                                  is_match_fn=is_match_fn)
             r["id"] = sample.get("id")
             r["category"] = sample.get("category", "")
             results.append(r)
@@ -85,9 +94,9 @@ def main():
     parser.add_argument("--n_top_features", type=int, default=3)
     parser.add_argument("--alpha_sweep", default="0,100,200,500",
                         help="Comma-separated alpha values")
-    parser.add_argument("--vab_dataset_id", default="anvo25/vlms-are-biased")
-    parser.add_argument("--vab_split", default="main")
-    parser.add_argument("--n_samples", type=int, default=240)
+    parser.add_argument("--dataset", default="vab", choices=["vab", "vilp", "vlind"])
+    parser.add_argument("--n_samples", type=int, default=None,
+                        help="Samples to evaluate (default: all available)")
     parser.add_argument("--output_dir", default="results/steering/")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
@@ -114,7 +123,8 @@ def main():
 
     model, processor = load_gemma3(args.model, device=args.device)
     sae = load_sae(args.target_layer, args.model_size, args.width, args.l0_level, args.device)
-    samples = load_vab(args.vab_dataset_id, args.vab_split, args.n_samples)
+    samples = load_dataset(args.dataset, args.n_samples)
+    is_match_fn = get_is_match(args.dataset)
 
     # Pre-compute vanilla answers once (shared across all latents and alphas)
     logger.info("Pre-computing vanilla answers for %d samples...", len(samples))
@@ -126,7 +136,8 @@ def main():
         for s in _tqdm(samples, desc="Vanilla"):
             try:
                 r = steered_generate(model, processor, s, args.target_layer,
-                                     _dummy_sv, alpha=0.0, device=args.device)
+                                     _dummy_sv, alpha=0.0, device=args.device,
+                                     is_match_fn=is_match_fn)
                 vanilla_cache[s.get("id")] = r["vanilla_answer"]
             except Exception as e:
                 logger.warning("Vanilla pass failed for sample %s: %s", s.get("id"), e)
@@ -143,6 +154,7 @@ def main():
                 model, processor, samples, args.target_layer,
                 sv, alpha, latent_dir, args.device,
                 vanilla_cache=vanilla_cache,
+                is_match_fn=is_match_fn,
             )
             summary["latent_idx"] = latent_idx
             latent_summaries.append(summary)
