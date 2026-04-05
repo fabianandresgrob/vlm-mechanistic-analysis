@@ -106,6 +106,7 @@ def steered_generate(
     device: str = "cuda",
     max_new_tokens: int = 10,
     precomputed_vanilla: str | None = None,
+    is_match_fn=None,
 ) -> dict:
     """Generate an answer with and without steering for a single sample.
 
@@ -152,8 +153,11 @@ def steered_generate(
         "target_layer": target_layer,
     }
     if "answer" in sample and sample["answer"]:
-        gt = sample["answer"].strip().lower()
-        result["is_correct_vanilla"] = vanilla_answer.lower() == gt
-        result["is_correct_steered"] = steered_answer.lower() == gt
+        gt = sample["answer"]
+        match = is_match_fn if is_match_fn is not None else (
+            lambda p, t: p.strip().lower() == t.strip().lower()
+        )
+        result["is_correct_vanilla"] = match(vanilla_answer, gt)
+        result["is_correct_steered"] = match(steered_answer, gt)
 
     return result

@@ -46,7 +46,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chain_of_embedding.models.gemma3 import load_gemma3
-from data_loaders import load_vab, load_vilp, load_vlind_bench, load_vqav2
+from data_loaders import load_vab, load_vilp, load_vlind_bench, load_vqav2, get_is_match
 from feature_search.steering import steering_hook, steered_generate
 from revis.vector_calculator import compute_revis_vector
 
@@ -111,13 +111,15 @@ def stage_steer(args, model, processor, steering_vector: torch.Tensor):
     """Run steered generation sweep and write per-alpha JSONL files."""
     samples = load_calibration_samples(args.dataset, args.n_samples)
     alphas = [float(a) for a in args.alphas.split(",")]
+    is_match_fn = get_is_match(args.dataset)
     logger.info(
         "Steering on %d samples, layer %d, alphas=%s",
         len(samples), args.layer, alphas,
     )
 
     sv = steering_vector.to(args.device)
-    os.makedirs(args.output_dir, exist_ok=True)
+    dataset_dir = os.path.join(args.output_dir, args.dataset)
+    os.makedirs(dataset_dir, exist_ok=True)
 
     # Pre-compute vanilla answers once (avoid N*K forward passes)
     logger.info("Pre-computing vanilla answers…")
@@ -138,7 +140,7 @@ def stage_steer(args, model, processor, steering_vector: torch.Tensor):
     for alpha in alphas:
         if alpha == 0.0:
             continue
-        out_path = os.path.join(args.output_dir, f"revis_layer{args.layer}_alpha{alpha:g}.jsonl")
+        out_path = os.path.join(dataset_dir, f"revis_layer{args.layer}_alpha{alpha:g}.jsonl")
         if args.resume and os.path.exists(out_path):
             logger.info("Skipping alpha=%g (already exists).", alpha)
             continue
@@ -154,6 +156,7 @@ def stage_steer(args, model, processor, steering_vector: torch.Tensor):
                 device=args.device,
                 max_new_tokens=20,
                 precomputed_vanilla=vanilla_answers[sid],
+                is_match_fn=is_match_fn,
             )
             result["sample_id"] = sid
             records.append(result)
@@ -170,20 +173,22 @@ def stage_steer(args, model, processor, steering_vector: torch.Tensor):
         )
 
     # Write vanilla baseline
-    vanilla_path = os.path.join(args.output_dir, f"revis_layer{args.layer}_alpha0.jsonl")
+    vanilla_path = os.path.join(dataset_dir, f"revis_layer{args.layer}_alpha0.jsonl")
     with open(vanilla_path, "w") as f:
         for sample in samples:
             sid = sample["id"]
+            ans = vanilla_answers[sid]
             r = {
                 "sample_id": sid,
-                "vanilla_answer": vanilla_answers[sid],
-                "steered_answer": vanilla_answers[sid],
+                "vanilla_answer": ans,
+                "steered_answer": ans,
                 "alpha": 0.0,
                 "target_layer": args.layer,
             }
             if "answer" in sample and sample["answer"]:
-                r["is_correct_vanilla"] = vanilla_answers[sid].lower() == sample["answer"].strip().lower()
-                r["is_correct_steered"] = r["is_correct_vanilla"]
+                correct = is_match_fn(ans, sample["answer"])
+                r["is_correct_vanilla"] = correct
+                r["is_correct_steered"] = correct
             f.write(json.dumps(r) + "\n")
 
 
