@@ -41,9 +41,9 @@ def main():
     parser.add_argument("--target_layer", type=int, required=True,
                         help="Target LLM layer (from Exp 2.4 + 2.5 intersection)")
     parser.add_argument("--width", default="16k",
-                        choices=["16k", "64k", "256k", "1m"])
-    parser.add_argument("--l0_level", default="medium",
-                        choices=["small", "medium", "large"])
+                        choices=["16k", "262k"])
+    parser.add_argument("--l0_level", default="big",
+                        choices=["small", "big"])
     parser.add_argument("--n_samples", type=int, default=5000)
     parser.add_argument("--noise_threshold", type=float, default=0.02)
     parser.add_argument("--output_dir", default="results/feature_search/")
@@ -57,18 +57,23 @@ def main():
     )
     os.makedirs(output_dir, exist_ok=True)
 
-    logger.info("Loading model %s…", args.model)
-    model, processor = load_gemma3(args.model, device=args.device)
+    acts_path = os.path.join(output_dir, "acts.npz")
+    if os.path.exists(acts_path):
+        logger.info("Loading cached activations from %s", acts_path)
+        cached = np.load(acts_path)
+        acts_vis, acts_blind = cached["acts_vis"], cached["acts_blind"]
+    else:
+        logger.info("Loading model %s…", args.model)
+        model, processor = load_gemma3(args.model, device=args.device)
 
-    logger.info("Loading %d VQAv2 samples…", args.n_samples)
-    samples = load_vqav2(n_samples=args.n_samples)
+        logger.info("Loading %d VQAv2 samples…", args.n_samples)
+        samples = load_vqav2(n_samples=args.n_samples)
 
-    logger.info("Extracting activations at layer %d…", args.target_layer)
-    acts_vis, acts_blind = extract_answer_token_acts(
-        model, processor, samples, args.target_layer, args.device
-    )
-    np.savez(os.path.join(output_dir, "acts.npz"),
-             acts_vis=acts_vis, acts_blind=acts_blind)
+        logger.info("Extracting activations at layer %d…", args.target_layer)
+        acts_vis, acts_blind = extract_answer_token_acts(
+            model, processor, samples, args.target_layer, args.device
+        )
+        np.savez(acts_path, acts_vis=acts_vis, acts_blind=acts_blind)
 
     logger.info("Loading SAE…")
     sae = load_sae(args.target_layer, args.model_size, args.width, args.l0_level, args.device)

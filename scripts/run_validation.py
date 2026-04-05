@@ -35,7 +35,7 @@ def main():
     parser.add_argument("--model_size", default="4b")
     parser.add_argument("--target_layer", type=int, required=True)
     parser.add_argument("--width", default="16k")
-    parser.add_argument("--l0_level", default="medium")
+    parser.add_argument("--l0_level", default="big", choices=["small", "big"])
     parser.add_argument("--feature_search_dir", required=True,
                         help="Output dir from Exp 3.1 (contains top_features.json)")
     parser.add_argument("--vab_dataset_id", default="anvo25/vlms-are-biased")

@@ -78,7 +78,7 @@ def main():
     parser.add_argument("--model_size", default="4b")
     parser.add_argument("--target_layer", type=int, required=True)
     parser.add_argument("--width", default="16k")
-    parser.add_argument("--l0_level", default="medium")
+    parser.add_argument("--l0_level", default="big", choices=["small", "big"])
     parser.add_argument("--latent_idx", type=int, default=None,
                         help="Specific latent to steer. If None, use --feature_search_dir.")
     parser.add_argument("--feature_search_dir", default=None)

@@ -41,8 +41,9 @@ def load_sae(
     if key in _sae_cache:
         return _sae_cache[key]
 
-    release = f"gemma-scope-2-{model_size}-it-resid_post_all"
-    sae_id = f"layer_{layer_idx}_width_{width}_l0_{l0_level}"
+    release = f"gemma-scope-2-{model_size}-it-res-all"
+    width_mapped = {"256k": "262k", "64k": "65k"}.get(width, width)
+    sae_id = f"layer_{layer_idx}_width_{width_mapped}_l0_{l0_level}"
     try:
         sae = SAE.from_pretrained(release=release, sae_id=sae_id, device=device)
         sae.eval()
