@@ -77,6 +77,29 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--imagenet_split", default="val", choices=["val", "train"],
                    help="ImageNet split to sample from.")
 
+    # Image-based extra datasets (CC3M, CC12M downloaded via img2dataset, etc.)
+    p.add_argument("--image_datasets", nargs="+", default=[],
+                   metavar="NAME:PATH",
+                   help="Additional image folders to include as training-data candidates. "
+                        "Format: 'cc3m:/path/to/cc3m_images'. "
+                        "Works with img2dataset output (shard subfolders of .jpg/.webp files) "
+                        "or any flat/nested image folder. "
+                        "Images are encoded with CLIP image encoder, same as ImageNet.")
+    p.add_argument("--n_extra_images", type=int, default=5000,
+                   help="Images to sample from each --image_datasets entry (default: 5000).")
+
+    # Caption-based datasets (CC3M, CC12M, etc.) — fallback when images not available
+    p.add_argument("--caption_files", nargs="+", default=[],
+                   metavar="NAME:PATH",
+                   help="Caption TSV files to include as training-data candidates. "
+                        "Format: 'cc3m:/path/to/Train_GCC-training.tsv'. "
+                        "Each file should have one caption per line, optionally tab-separated "
+                        "as 'url<TAB>caption' (CC3M/CC12M format) or just 'caption'. "
+                        "Concepts are assigned via CLIP text encoder — use as fallback when "
+                        "images are not available (less accurate than image-based encoding).")
+    p.add_argument("--n_captions", type=int, default=50000,
+                   help="Max captions to sample from each caption file (default: 50000).")
+
     # Benchmark selection
     p.add_argument("--benchmarks", nargs="+",
                    default=["vab", "vilp", "vlind_bench"],
@@ -138,6 +161,82 @@ def load_benchmarks(benchmark_names: list[str], n_samples: int | None) -> dict[s
     return samples
 
 
+def load_captions_tsv(path: str, n_samples: int | None = None, seed: int = 42) -> list[str]:
+    """Load captions from CC3M/CC12M TSV format.
+
+    Handles two formats:
+      - 'url<TAB>caption'  (CC3M Train_GCC-training.tsv, CC12M)
+      - plain 'caption'    (one per line)
+
+    Randomly samples n_samples if the file is larger.
+    """
+    import random
+    rng = random.Random(seed)
+    captions: list[str] = []
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("\t", 1)
+            caption = parts[1] if len(parts) == 2 else parts[0]
+            captions.append(caption)
+
+    if n_samples and len(captions) > n_samples:
+        captions = rng.sample(captions, n_samples)
+    logger.info("Loaded %d captions from %s", len(captions), path)
+    return captions
+
+
+def sample_images_from_folder(
+    folder: str,
+    n_samples: int = 5000,
+    seed: int = 42,
+    extensions: tuple[str, ...] = (".jpg", ".jpeg", ".png", ".webp"),
+) -> list:
+    """Load a random sample of images from any flat or nested image folder.
+
+    Works with:
+      - img2dataset output (shard subfolders: 00000/*.jpg, 00001/*.jpg, …)
+      - Any ImageFolder-style or flat directory of images
+
+    Args:
+        folder: Root directory to search recursively for images.
+        n_samples: How many images to load.
+        seed: Random seed for reproducibility.
+        extensions: Image file extensions to include.
+
+    Returns:
+        List of PIL.Image.Image objects (RGB).
+    """
+    import random
+    from PIL import Image as PILImage
+
+    root = Path(folder)
+    rng = random.Random(seed)
+
+    # Collect all image paths recursively
+    all_paths = [
+        p for p in root.rglob("*")
+        if p.suffix.lower() in extensions and p.is_file()
+    ]
+    if not all_paths:
+        raise FileNotFoundError(f"No image files found in {folder}")
+
+    logger.info("Found %d images in %s, sampling %d", len(all_paths), folder, min(n_samples, len(all_paths)))
+    chosen = rng.sample(all_paths, min(n_samples, len(all_paths)))
+
+    images = []
+    for p in tqdm(chosen, desc=f"Loading images from {root.name}"):
+        try:
+            images.append(PILImage.open(p).convert("RGB"))
+        except Exception as e:
+            logger.debug("Skipping %s: %s", p, e)
+
+    logger.info("Loaded %d images from %s", len(images), folder)
+    return images
+
+
 def extract_images(samples: list[dict]) -> list:
     """Extract PIL images from sample dicts, skipping None entries."""
     from PIL import Image as PILImage
@@ -164,6 +263,28 @@ def _emb_path(output_dir: Path, name: str) -> Path:
 
 def _asgn_path(output_dir: Path, name: str) -> Path:
     return output_dir / "assignments" / f"{name}.npy"
+
+
+def _load_or_encode_captions(
+    name: str,
+    captions: list[str],
+    model,
+    processor,
+    device: str,
+    output_dir: Path,
+    batch_size: int,
+    resume: bool,
+) -> np.ndarray:
+    """Encode captions with CLIP text encoder, using cached .npy if available."""
+    path = _emb_path(output_dir, name)
+    if resume and path.exists():
+        logger.info("Loading cached caption embeddings for %s from %s", name, path)
+        return np.load(path)
+    logger.info("Encoding %d captions for %s with CLIP text encoder…", len(captions), name)
+    emb = encode_texts(captions, model, processor, device, batch_size=batch_size, template="")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(path, emb)
+    return emb
 
 
 def _load_or_encode_images(
@@ -320,6 +441,46 @@ def main() -> None:
         except Exception as e:
             logger.error("Failed to load iNaturalist: %s", e)
 
+    # 8b. Extra image-based datasets (CC3M, CC12M via img2dataset, etc.)
+    for spec in args.image_datasets:
+        if ":" not in spec:
+            logger.error("Invalid --image_datasets spec %r (expected 'name:path')", spec)
+            continue
+        name, folder = spec.split(":", 1)
+        try:
+            images = sample_images_from_folder(folder, n_samples=args.n_extra_images)
+            image_emb = _load_or_encode_images(
+                name, images, model, processor, args.device,
+                output_dir, args.batch_size_images, args.resume,
+            )
+            assignments = _load_or_assign(
+                name, image_emb, concept_emb, args.top_k, output_dir, args.resume,
+            )
+            freq_by_dataset[name] = compute_concept_frequencies(assignments, n_concepts)
+            logger.info("Image dataset %s: %d images processed", name, len(images))
+        except Exception as e:
+            logger.error("Failed to process image dataset %s (%s): %s", name, folder, e)
+
+    # 8c. Caption-based datasets (CC3M, CC12M, etc.)
+    for spec in args.caption_files:
+        if ":" not in spec:
+            logger.error("Invalid --caption_files spec %r (expected 'name:path')", spec)
+            continue
+        name, path = spec.split(":", 1)
+        try:
+            captions = load_captions_tsv(path, n_samples=args.n_captions)
+            cap_emb = _load_or_encode_captions(
+                name, captions, model, processor, args.device,
+                output_dir, args.batch_size_texts, args.resume,
+            )
+            assignments = _load_or_assign(
+                name, cap_emb, concept_emb, args.top_k, output_dir, args.resume,
+            )
+            freq_by_dataset[name] = compute_concept_frequencies(assignments, n_concepts)
+            logger.info("Caption dataset %s: %d captions processed", name, len(captions))
+        except Exception as e:
+            logger.error("Failed to process caption file %s: %s", path, e)
+
     if not freq_by_dataset:
         logger.error("No datasets encoded. Exiting.")
         return
@@ -329,9 +490,10 @@ def main() -> None:
     np.savez(freq_path, concepts=np.array(concepts), **freq_by_dataset)
     logger.info("Saved frequency arrays to %s", freq_path)
 
-    # 10. Gap analysis: benchmarks vs. ImageNet (or first training set)
-    training_keys = [k for k in freq_by_dataset if k in ("imagenet", "inat")]
-    benchmark_keys = [k for k in freq_by_dataset if k not in ("imagenet", "inat")]
+    # 10. Gap analysis: benchmarks vs. training datasets
+    extra_names = {spec.split(":", 1)[0] for spec in args.caption_files + args.image_datasets if ":" in spec}
+    training_keys = [k for k in freq_by_dataset if k in {"imagenet", "inat"} or k in extra_names]
+    benchmark_keys = [k for k in freq_by_dataset if k not in training_keys]
 
     gap_results: dict = {}
     if training_keys and benchmark_keys:
