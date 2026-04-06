@@ -41,6 +41,7 @@ def get_is_match(dataset: str):
     """Return the correct is_match function for the given dataset name."""
     return {
         "vlms_are_biased": vab_is_match,
+        "vab": vab_is_match,
         "vab_pairs": vab_is_match,
         "vilp": vilp_is_match,
         "vlind": vlind_is_match,
