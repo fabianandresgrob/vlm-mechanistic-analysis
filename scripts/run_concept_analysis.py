@@ -161,30 +161,53 @@ def load_benchmarks(benchmark_names: list[str], n_samples: int | None) -> dict[s
     return samples
 
 
-def load_captions_tsv(path: str, n_samples: int | None = None, seed: int = 42) -> list[str]:
-    """Load captions from CC3M/CC12M TSV format.
+def load_captions_tsv(
+    path: str,
+    n_samples: int | None = None,
+    seed: int = 42,
+    caption_col: int | None = None,
+) -> list[str]:
+    """Load captions from a TSV file, randomly sampling if needed.
 
-    Handles two formats:
-      - 'url<TAB>caption'  (CC3M Train_GCC-training.tsv, CC12M)
-      - plain 'caption'    (one per line)
+    Column formats (auto-detected if caption_col is None):
+      - CC3M  (Train_GCC-training.tsv): 'caption<TAB>url'  → caption_col=0
+      - CC12M (cc12m.tsv):              'url<TAB>caption'  → caption_col=1
+      - Plain text:                     one caption per line
 
-    Randomly samples n_samples if the file is larger.
+    Auto-detection: reads the first line; if column 0 starts with 'http',
+    it's url-first (CC12M style, caption_col=1), otherwise caption-first
+    (CC3M style, caption_col=0).
     """
     import random
     rng = random.Random(seed)
+
+    # Auto-detect column order from first line
+    if caption_col is None:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            first = f.readline().strip()
+        parts = first.split("\t", 1)
+        if len(parts) == 2 and parts[0].startswith("http"):
+            caption_col = 1  # CC12M: url\tcaption
+            logger.info("Auto-detected CC12M format (url\\tcaption) for %s", path)
+        else:
+            caption_col = 0  # CC3M: caption\turl  or plain text
+            logger.info("Auto-detected CC3M/plain format (caption-first) for %s", path)
+
     captions: list[str] = []
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
-            parts = line.split("\t", 1)
-            caption = parts[1] if len(parts) == 2 else parts[0]
-            captions.append(caption)
+            parts = line.split("\t")
+            if caption_col < len(parts):
+                captions.append(parts[caption_col])
+            else:
+                captions.append(line)
 
     if n_samples and len(captions) > n_samples:
         captions = rng.sample(captions, n_samples)
-    logger.info("Loaded %d captions from %s", len(captions), path)
+    logger.info("Loaded %d captions from %s (col=%d)", len(captions), path, caption_col)
     return captions
 
 
