@@ -44,6 +44,36 @@ def get_steering_vector(sae: SAE, latent_idx: int) -> torch.Tensor:
     return sae.W_dec[latent_idx].detach()   # (d_in,)
 
 
+def get_combined_steering_vector(
+    sae: SAE,
+    latent_indices: list[int],
+    weights: list[float] | None = None,
+) -> torch.Tensor:
+    """Weighted sum of decoder directions, renormalized to unit norm.
+
+    Args:
+        sae:            Loaded SAELens SAE.
+        latent_indices: Latents to combine.
+        weights:        Per-latent scalar weights (signed — negative weight
+                        inverts a latent's contribution). Defaults to uniform.
+                        Need not be unit-normalized; the result is renormalized.
+
+    Returns:
+        Tensor of shape (d_in,), unit norm, on the same device as the SAE.
+    """
+    if weights is None:
+        weights = [1.0] * len(latent_indices)
+    if len(weights) != len(latent_indices):
+        raise ValueError(f"weights length {len(weights)} != latent_indices length {len(latent_indices)}")
+    vecs = torch.stack([sae.W_dec[i].detach() for i in latent_indices])  # (n, d_in)
+    w = torch.tensor(weights, dtype=vecs.dtype, device=vecs.device)
+    combined = (w.unsqueeze(1) * vecs).sum(0)
+    norm = combined.norm()
+    if norm < 1e-8:
+        raise ValueError("Combined steering vector has near-zero norm — check weights.")
+    return combined / norm
+
+
 @contextmanager
 def steering_hook(
     model,

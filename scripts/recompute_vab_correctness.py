@@ -54,6 +54,33 @@ def recompute_file(path: str, gt: dict) -> tuple[float, float]:
     return van, ste
 
 
+def recompute_summaries(latent_path: str) -> None:
+    """Recompute sweep_summary.json and update all_summaries.json from fixed jsonl files."""
+    latent_summaries = []
+    for fname in sorted(os.listdir(latent_path)):
+        if not fname.startswith("alpha_") or not fname.endswith(".jsonl"):
+            continue
+        alpha = float(fname[len("alpha_"):-len(".jsonl")])
+        records = [json.loads(l) for l in open(os.path.join(latent_path, fname))]
+        n = len(records)
+        van = sum(r.get("is_correct_vanilla", False) for r in records) / n if n > 0 else 0.0
+        ste = sum(r.get("is_correct_steered", False) for r in records) / n if n > 0 else 0.0
+        # Preserve existing fields (latent_idx) from old summary if present
+        summary_path = os.path.join(latent_path, "sweep_summary.json")
+        old_summaries = {}
+        if os.path.exists(summary_path):
+            for s in json.load(open(summary_path)):
+                old_summaries[s.get("alpha")] = s
+        entry = old_summaries.get(alpha, {})
+        entry.update({"alpha": alpha, "vanilla_accuracy": van, "steered_accuracy": ste,
+                       "delta": ste - van, "n": n})
+        latent_summaries.append(entry)
+
+    if latent_summaries:
+        with open(os.path.join(latent_path, "sweep_summary.json"), "w") as f:
+            json.dump(latent_summaries, f, indent=2)
+
+
 def main():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     gt = build_gt_lookup()
@@ -72,6 +99,7 @@ def main():
 
     # SAE steering results
     steering_root = os.path.join(repo_root, "results", "steering")
+    all_summaries_by_layer: dict[str, list] = {}
     for model_dir in os.listdir(steering_root):
         vab_dir = os.path.join(steering_root, model_dir, "vab")
         if not os.path.isdir(vab_dir):
@@ -80,6 +108,7 @@ def main():
             layer_path = os.path.join(vab_dir, layer_dir)
             if not os.path.isdir(layer_path):
                 continue
+            layer_all: list = []
             for latent_dir in os.listdir(layer_path):
                 latent_path = os.path.join(layer_path, latent_dir)
                 if not os.path.isdir(latent_path):
@@ -91,6 +120,16 @@ def main():
                     path = os.path.join(latent_path, fname)
                     van, ste = recompute_file(path, gt)
                     print(f"  {fname}: vanilla={van:.3f}  steered={ste:.3f}  Δ={ste-van:+.3f}")
+                recompute_summaries(latent_path)
+                sweep = json.load(open(os.path.join(latent_path, "sweep_summary.json")))
+                layer_all.extend(sweep)
+
+            # Rewrite all_summaries.json for this layer
+            all_path = os.path.join(layer_path, "all_summaries.json")
+            if layer_all:
+                with open(all_path, "w") as f:
+                    json.dump(layer_all, f, indent=2)
+                print(f"\nUpdated {all_path}")
 
 
 if __name__ == "__main__":

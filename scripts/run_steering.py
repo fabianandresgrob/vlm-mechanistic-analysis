@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from chain_of_embedding.models.gemma3 import load_gemma3
 from data_loaders import load_vab, load_vilp, load_vlind_bench, get_is_match
 from feature_search.sae_utils import load_sae
-from feature_search.steering import get_steering_vector, steered_generate
+from feature_search.steering import get_steering_vector, get_combined_steering_vector, steered_generate
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -53,9 +53,20 @@ def load_dataset(dataset: str, n_samples: int) -> list[dict]:
 def run_one_latent_alpha(model, processor, samples, target_layer,
                           steering_vector, alpha, output_dir, device,
                           vanilla_cache: dict | None = None,
-                          is_match_fn=None):
+                          is_match_fn=None, skip_existing: bool = False):
     import jsonlines
     from tqdm import tqdm
+
+    out_path = os.path.join(output_dir, f"alpha_{alpha:g}.jsonl")
+    if skip_existing and os.path.exists(out_path):
+        records = [json.loads(l) for l in open(out_path)]
+        n = len(records)
+        van = sum(r.get("is_correct_vanilla", False) for r in records) / n if n > 0 else 0.0
+        ste = sum(r.get("is_correct_steered", False) for r in records) / n if n > 0 else 0.0
+        logger.info("Skipping existing %s (vanilla=%.3f steered=%.3f)", out_path, van, ste)
+        return {"alpha": alpha, "vanilla_accuracy": van, "steered_accuracy": ste,
+                "delta": ste - van, "n": n}
+
     results = []
     for sample in tqdm(samples, desc=f"Steering α={alpha}"):
         try:
@@ -73,7 +84,7 @@ def run_one_latent_alpha(model, processor, samples, target_layer,
     vanilla_acc = sum(r.get("is_correct_vanilla", False) for r in results) / n if n > 0 else 0.0
     steered_acc = sum(r.get("is_correct_steered", False) for r in results) / n if n > 0 else 0.0
 
-    with jsonlines.open(os.path.join(output_dir, f"alpha_{alpha:g}.jsonl"), "w") as w:
+    with jsonlines.open(out_path, "w") as w:
         w.write_all(results)
 
     return {"alpha": alpha, "vanilla_accuracy": vanilla_acc,
@@ -99,6 +110,19 @@ def main():
                         help="Samples to evaluate (default: all available)")
     parser.add_argument("--output_dir", default="results/steering/")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--skip_existing", action="store_true",
+                        help="Skip alpha/latent combos where the .jsonl already exists.")
+    parser.add_argument("--combine_features", action="store_true",
+                        help="Steer with a single combined vector (weighted sum of top-N decoder "
+                             "directions) instead of iterating over latents individually. "
+                             "Results go to combined_top{N}/ instead of latent_*/ dirs.")
+    parser.add_argument("--combine_weights", default=None,
+                        help="Comma-separated weights for --combine_features (signed floats). "
+                             "Defaults to the s_visual separation scores from top_features.json, "
+                             "or uniform if scores are unavailable. Length must match --n_top_features.")
+    parser.add_argument("--feature_source", default=None,
+                        help="Label for where the latents came from (e.g. 'vqav2', 'vab'). "
+                             "If omitted, inferred from --feature_search_dir or --latent_idx.")
     args = parser.parse_args()
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -109,7 +133,25 @@ def main():
 
     alphas = [float(a) for a in args.alpha_sweep.split(",")]
 
+    # Resolve feature_source label
+    if args.feature_source is not None:
+        feature_source = args.feature_source
+    elif args.feature_search_dir is not None:
+        # Infer from the directory path — take the first path component that isn't
+        # a layer/model slug, i.e. the dataset folder name.
+        parts = os.path.normpath(args.feature_search_dir).split(os.sep)
+        # Walk backwards: skip layer_* and model-slug components
+        feature_source = next(
+            (p for p in reversed(parts) if not p.startswith("layer_") and p not in ("feature_search",)),
+            args.feature_search_dir,
+        )
+    else:
+        feature_source = "manual"
+
+    logger.info("Feature source: %s", feature_source)
+
     # Determine which latents to steer
+    top_features_meta: list[dict] = []   # carries s_visual scores for default weights
     if args.latent_idx is not None:
         latent_indices = [args.latent_idx]
     elif args.feature_search_dir:
@@ -117,7 +159,8 @@ def main():
             top = json.load(f)
         if "top_visual" not in top:
             parser.error(f"top_features.json missing 'top_visual' key. Keys found: {list(top.keys())}")
-        latent_indices = [f["latent_idx"] for f in top["top_visual"][:args.n_top_features]]
+        top_features_meta = top["top_visual"][:args.n_top_features]
+        latent_indices = [f["latent_idx"] for f in top_features_meta]
     else:
         parser.error("Either --latent_idx or --feature_search_dir is required.")
 
@@ -143,29 +186,78 @@ def main():
                 logger.warning("Vanilla pass failed for sample %s: %s", s.get("id"), e)
 
     all_summaries = []
-    for latent_idx in latent_indices:
-        sv = get_steering_vector(sae, latent_idx)
-        latent_dir = os.path.join(base_output_dir, f"latent_{latent_idx}")
-        os.makedirs(latent_dir, exist_ok=True)
 
-        latent_summaries = []
+    if args.combine_features:
+        # --- Combined mode: one steering vector from weighted sum of top-N latents ---
+        if args.combine_weights is not None:
+            weights = [float(w) for w in args.combine_weights.split(",")]
+            if len(weights) != len(latent_indices):
+                parser.error(f"--combine_weights has {len(weights)} values but {len(latent_indices)} latents selected.")
+        elif top_features_meta:
+            weights = [f["s_visual"] for f in top_features_meta]
+        else:
+            weights = None  # uniform
+
+        sv = get_combined_steering_vector(sae, latent_indices, weights)
+        label = f"combined_top{len(latent_indices)}"
+        run_dir = os.path.join(base_output_dir, label)
+        os.makedirs(run_dir, exist_ok=True)
+
+        # Save metadata so the run is reproducible
+        meta = {"latent_indices": latent_indices, "weights": weights if weights is not None else [1.0] * len(latent_indices), "feature_source": feature_source}
+        with open(os.path.join(run_dir, "combination_meta.json"), "w") as f:
+            json.dump(meta, f, indent=2)
+        logger.info("Combined vector from latents %s with weights %s", latent_indices, meta["weights"])
+
+        run_summaries = []
         for alpha in alphas:
             summary = run_one_latent_alpha(
                 model, processor, samples, args.target_layer,
-                sv, alpha, latent_dir, args.device,
+                sv, alpha, run_dir, args.device,
                 vanilla_cache=vanilla_cache,
                 is_match_fn=is_match_fn,
+                skip_existing=args.skip_existing,
             )
-            summary["latent_idx"] = latent_idx
-            latent_summaries.append(summary)
-            print(f"  latent {latent_idx}  α={alpha:+.0f}  "
+            summary["label"] = label
+            summary["latent_indices"] = latent_indices
+            summary["feature_source"] = feature_source
+            run_summaries.append(summary)
+            print(f"  {label}  α={alpha:+.0f}  "
                   f"vanilla={summary['vanilla_accuracy']:.3f}  "
                   f"steered={summary['steered_accuracy']:.3f}  "
                   f"Δ={summary['delta']:+.3f}")
 
-        with open(os.path.join(latent_dir, "sweep_summary.json"), "w") as f:
-            json.dump(latent_summaries, f, indent=2)
-        all_summaries.extend(latent_summaries)
+        with open(os.path.join(run_dir, "sweep_summary.json"), "w") as f:
+            json.dump(run_summaries, f, indent=2)
+        all_summaries.extend(run_summaries)
+
+    else:
+        # --- Per-latent mode (default, backward compatible) ---
+        for latent_idx in latent_indices:
+            sv = get_steering_vector(sae, latent_idx)
+            latent_dir = os.path.join(base_output_dir, f"latent_{latent_idx}")
+            os.makedirs(latent_dir, exist_ok=True)
+
+            latent_summaries = []
+            for alpha in alphas:
+                summary = run_one_latent_alpha(
+                    model, processor, samples, args.target_layer,
+                    sv, alpha, latent_dir, args.device,
+                    vanilla_cache=vanilla_cache,
+                    is_match_fn=is_match_fn,
+                    skip_existing=args.skip_existing,
+                )
+                summary["latent_idx"] = latent_idx
+                summary["feature_source"] = feature_source
+                latent_summaries.append(summary)
+                print(f"  latent {latent_idx}  α={alpha:+.0f}  "
+                      f"vanilla={summary['vanilla_accuracy']:.3f}  "
+                      f"steered={summary['steered_accuracy']:.3f}  "
+                      f"Δ={summary['delta']:+.3f}")
+
+            with open(os.path.join(latent_dir, "sweep_summary.json"), "w") as f:
+                json.dump(latent_summaries, f, indent=2)
+            all_summaries.extend(latent_summaries)
 
     with open(os.path.join(base_output_dir, "all_summaries.json"), "w") as f:
         json.dump(all_summaries, f, indent=2)
