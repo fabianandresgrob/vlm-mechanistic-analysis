@@ -88,6 +88,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--n_extra_images", type=int, default=5000,
                    help="Images to sample from each --image_datasets entry (default: 5000).")
 
+    # HuggingFace datasets — loaded directly from HF cache via datasets library
+    p.add_argument("--hf_datasets", nargs="+", default=[],
+                   metavar="NAME:REPO_ID",
+                   help="HuggingFace datasets to load via the datasets library (uses HF cache). "
+                        "Format: 'cc3m:google-research-datasets/conceptual_captions'. "
+                        "Captions are extracted and encoded with CLIP text encoder. "
+                        "Optionally append split: 'cc3m:google-research-datasets/conceptual_captions:train'.")
+    p.add_argument("--n_hf_captions", type=int, default=50000,
+                   help="Captions to sample from each --hf_datasets entry (default: 50000).")
+
     # Caption-based datasets (CC3M, CC12M, etc.) — fallback when images not available
     p.add_argument("--caption_files", nargs="+", default=[],
                    metavar="NAME:PATH",
@@ -208,6 +218,46 @@ def load_captions_tsv(
     if n_samples and len(captions) > n_samples:
         captions = rng.sample(captions, n_samples)
     logger.info("Loaded %d captions from %s (col=%d)", len(captions), path, caption_col)
+    return captions
+
+
+def load_captions_from_hf(
+    repo_id: str,
+    split: str = "train",
+    n_samples: int | None = None,
+    seed: int = 42,
+) -> list[str]:
+    """Load captions from a HuggingFace dataset (uses local cache if available).
+
+    Tries common caption column names: 'caption', 'text', 'captions'.
+    For CC3M (conceptual_captions) the caption column is 'caption'.
+    For CC12M (conceptual-12m) the caption column is 'caption'.
+    """
+    from datasets import load_dataset
+    import random
+
+    logger.info("Loading HF dataset %s (split=%s)…", repo_id, split)
+    ds = load_dataset(repo_id, split=split)
+
+    # Find caption column
+    caption_col = None
+    for col in ("caption", "text", "captions", "sentence"):
+        if col in ds.column_names:
+            caption_col = col
+            break
+    if caption_col is None:
+        raise ValueError(
+            f"Could not find caption column in {repo_id}. "
+            f"Available columns: {ds.column_names}"
+        )
+    logger.info("Using column %r from %s (%d rows)", caption_col, repo_id, len(ds))
+
+    captions = ds[caption_col]
+    if n_samples and len(captions) > n_samples:
+        rng = random.Random(seed)
+        captions = rng.sample(list(captions), n_samples)
+
+    logger.info("Sampled %d captions from %s", len(captions), repo_id)
     return captions
 
 
@@ -484,7 +534,30 @@ def main() -> None:
         except Exception as e:
             logger.error("Failed to process image dataset %s (%s): %s", name, folder, e)
 
-    # 8c. Caption-based datasets (CC3M, CC12M, etc.)
+    # 8c. HuggingFace datasets (loaded from HF cache)
+    for spec in args.hf_datasets:
+        parts = spec.split(":")
+        if len(parts) < 2:
+            logger.error("Invalid --hf_datasets spec %r (expected 'name:repo_id' or 'name:repo_id:split')", spec)
+            continue
+        name = parts[0]
+        repo_id = parts[1]
+        split = parts[2] if len(parts) > 2 else "train"
+        try:
+            captions = load_captions_from_hf(repo_id, split=split, n_samples=args.n_hf_captions)
+            cap_emb = _load_or_encode_captions(
+                name, captions, model, processor, args.device,
+                output_dir, args.batch_size_texts, args.resume,
+            )
+            assignments = _load_or_assign(
+                name, cap_emb, concept_emb, args.top_k, output_dir, args.resume,
+            )
+            freq_by_dataset[name] = compute_concept_frequencies(assignments, n_concepts)
+            logger.info("HF dataset %s: %d captions processed", name, len(captions))
+        except Exception as e:
+            logger.error("Failed to load HF dataset %s (%s): %s", name, repo_id, e)
+
+    # 8d. Caption-based datasets (CC3M, CC12M, etc.)
     for spec in args.caption_files:
         if ":" not in spec:
             logger.error("Invalid --caption_files spec %r (expected 'name:path')", spec)
@@ -514,7 +587,7 @@ def main() -> None:
     logger.info("Saved frequency arrays to %s", freq_path)
 
     # 10. Gap analysis: benchmarks vs. training datasets
-    extra_names = {spec.split(":", 1)[0] for spec in args.caption_files + args.image_datasets if ":" in spec}
+    extra_names = {spec.split(":", 1)[0] for spec in args.caption_files + args.image_datasets + args.hf_datasets if ":" in spec}
     training_keys = [k for k in freq_by_dataset if k in {"imagenet", "inat"} or k in extra_names]
     benchmark_keys = [k for k in freq_by_dataset if k not in training_keys]
 
