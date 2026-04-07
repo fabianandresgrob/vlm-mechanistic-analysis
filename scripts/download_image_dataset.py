@@ -85,6 +85,7 @@ def main():
     n = args.n_samples or len(ds)
     with tempfile.NamedTemporaryFile(mode="w", suffix=".tsv", delete=False) as f:
         tsv_path = f.name
+        f.write("url\tcaption\n")  # header required by img2dataset
         for i, row in enumerate(ds):
             if i >= n:
                 break
@@ -100,8 +101,8 @@ def main():
         "img2dataset",
         "--url_list", tsv_path,
         "--input_format", "tsv",
-        "--url_col", "0",
-        "--caption_col", "1",
+        "--url_col", "url",
+        "--caption_col", "caption",
         "--output_folder", args.output_dir,
         "--image_size", str(args.image_size),
         "--resize_mode", "keep_ratio",
