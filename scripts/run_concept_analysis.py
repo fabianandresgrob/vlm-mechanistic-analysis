@@ -267,14 +267,15 @@ def sample_images_from_folder(
     seed: int = 42,
     extensions: tuple[str, ...] = (".jpg", ".jpeg", ".png", ".webp"),
 ) -> list:
-    """Load a random sample of images from any flat or nested image folder.
+    """Load a random sample of images from any flat/nested image folder or webdataset tars.
 
     Works with:
-      - img2dataset output (shard subfolders: 00000/*.jpg, 00001/*.jpg, …)
-      - Any ImageFolder-style or flat directory of images
+      - img2dataset webdataset output: shards of .tar files (00000.tar, 00001.tar, …)
+      - img2dataset files output: shard subfolders with loose .jpg files
+      - Any flat or nested directory of images
 
     Args:
-        folder: Root directory to search recursively for images.
+        folder: Root directory to search for images or .tar shards.
         n_samples: How many images to load.
         seed: Random seed for reproducibility.
         extensions: Image file extensions to include.
@@ -283,28 +284,59 @@ def sample_images_from_folder(
         List of PIL.Image.Image objects (RGB).
     """
     import random
+    import tarfile as tarfile_mod
     from PIL import Image as PILImage
+    import io
 
     root = Path(folder)
     rng = random.Random(seed)
 
-    # Collect all image paths recursively
-    all_paths = [
+    # Check if this is a webdataset (tar shards) or loose files
+    tar_files = sorted(root.rglob("*.tar"))
+    loose_files = [
         p for p in root.rglob("*")
         if p.suffix.lower() in extensions and p.is_file()
     ]
-    if not all_paths:
-        raise FileNotFoundError(f"No image files found in {folder}")
 
-    logger.info("Found %d images in %s, sampling %d", len(all_paths), folder, min(n_samples, len(all_paths)))
-    chosen = rng.sample(all_paths, min(n_samples, len(all_paths)))
-
-    images = []
-    for p in tqdm(chosen, desc=f"Loading images from {root.name}"):
-        try:
-            images.append(PILImage.open(p).convert("RGB"))
-        except Exception as e:
-            logger.debug("Skipping %s: %s", p, e)
+    if tar_files and not loose_files:
+        # Webdataset format: sample across tar shards
+        logger.info("Detected webdataset format: %d tar shards in %s", len(tar_files), folder)
+        images_per_shard = max(1, (n_samples + len(tar_files) - 1) // len(tar_files))
+        chosen_tars = rng.sample(tar_files, min(len(tar_files), n_samples))
+        images = []
+        for tar_path in tqdm(chosen_tars, desc=f"Loading from tars in {root.name}"):
+            if len(images) >= n_samples:
+                break
+            try:
+                with tarfile_mod.open(tar_path, "r") as tf:
+                    members = [m for m in tf.getmembers()
+                               if Path(m.name).suffix.lower() in extensions]
+                    chosen = rng.sample(members, min(images_per_shard, len(members)))
+                    for m in chosen:
+                        try:
+                            f = tf.extractfile(m)
+                            if f:
+                                images.append(PILImage.open(io.BytesIO(f.read())).convert("RGB"))
+                        except Exception as e:
+                            logger.debug("Skipping %s in %s: %s", m.name, tar_path, e)
+            except Exception as e:
+                logger.debug("Skipping tar %s: %s", tar_path, e)
+    elif loose_files:
+        # Loose files format
+        logger.info("Found %d loose images in %s, sampling %d",
+                    len(loose_files), folder, min(n_samples, len(loose_files)))
+        chosen = rng.sample(loose_files, min(n_samples, len(loose_files)))
+        images = []
+        for p in tqdm(chosen, desc=f"Loading images from {root.name}"):
+            try:
+                images.append(PILImage.open(p).convert("RGB"))
+            except Exception as e:
+                logger.debug("Skipping %s: %s", p, e)
+    else:
+        raise FileNotFoundError(
+            f"No images or .tar shards found in {folder}. "
+            f"Expected loose image files or webdataset .tar shards."
+        )
 
     logger.info("Loaded %d images from %s", len(images), folder)
     return images
