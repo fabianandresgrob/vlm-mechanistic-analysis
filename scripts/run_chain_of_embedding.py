@@ -107,6 +107,9 @@ def main():
                         help="Skip greedy decoding (faster, no D_VT/D_T split)")
     parser.add_argument("--vip_baseline_layers", type=int, default=4)
     parser.add_argument("--vip_threshold_k", type=float, default=2.0)
+    parser.add_argument("--vilp_mode", default="without_fact",
+                        choices=["without_fact", "with_fact"],
+                        help="ViLP prompt mode (default: without_fact)")
     args = parser.parse_args()
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -131,7 +134,7 @@ def main():
     elif args.dataset == "vab_pairs":
         raw = load_vab_pairs(n_samples=n)
     elif args.dataset == "vilp":
-        raw = load_vilp(n_samples=n)
+        raw = load_vilp(n_samples=n, mode=args.vilp_mode)
     elif args.dataset == "vlind":
         raw = load_vlind_bench(n_samples=n)
     else:

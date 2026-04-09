@@ -46,7 +46,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chain_of_embedding.models.gemma3 import load_gemma3
-from data_loaders import load_vab, load_vilp, load_vlind_bench, load_vqav2, get_is_match
+from data_loaders import load_vab, load_vilp_expanded, load_vlind_bench, load_vlind_bench_lp, load_vqav2, get_is_match
 from feature_search.steering import steering_hook, steered_generate
 from revis.vector_calculator import compute_revis_vector
 
@@ -58,14 +58,16 @@ logger = logging.getLogger(__name__)
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_calibration_samples(dataset: str, n_samples: int) -> list[dict]:
+def load_calibration_samples(dataset: str, n_samples: int,
+                              vilp_mode: str = "without_fact",
+                              vilp_images: str = "cf_only") -> list[dict]:
     """Load calibration samples for vector extraction."""
     if dataset == "vab":
         return load_vab(n_samples=n_samples)
     elif dataset == "vqav2":
         return load_vqav2(n_samples=n_samples)
     elif dataset == "vilp":
-        return load_vilp(n_samples=n_samples)
+        return load_vilp_expanded(n_samples=n_samples, mode=vilp_mode, images=vilp_images)
     elif dataset == "vlind":
         return load_vlind_bench(n_samples=n_samples)
     else:
@@ -78,7 +80,8 @@ def load_calibration_samples(dataset: str, n_samples: int) -> list[dict]:
 
 def stage_extract(args, model, processor) -> torch.Tensor:
     """Extract and save the REVIS steering vector."""
-    samples = load_calibration_samples(args.dataset, args.n_calib)
+    samples = load_calibration_samples(args.dataset, args.n_calib,
+                                        vilp_mode=args.vilp_mode, vilp_images=args.vilp_images)
     logger.info("Extracting REVIS vector at layer %d from %d samples…", args.layer, len(samples))
 
     v_pure, metadata = compute_revis_vector(
@@ -109,7 +112,12 @@ def stage_extract(args, model, processor) -> torch.Tensor:
 
 def stage_steer(args, model, processor, steering_vector: torch.Tensor):
     """Run steered generation sweep and write per-alpha JSONL files."""
-    samples = load_calibration_samples(args.dataset, args.n_samples)
+    # VLind eval uses LP items with CF images; calibration (stage_extract) keeps factual images.
+    if args.dataset == "vlind":
+        samples = load_vlind_bench_lp(n_samples=args.n_samples)
+    else:
+        samples = load_calibration_samples(args.dataset, args.n_samples,
+                                            vilp_mode=args.vilp_mode, vilp_images=args.vilp_images)
     alphas = [float(a) for a in args.alphas.split(",")]
     is_match_fn = get_is_match(args.dataset)
     logger.info(
@@ -159,6 +167,9 @@ def stage_steer(args, model, processor, steering_vector: torch.Tensor):
                 is_match_fn=is_match_fn,
             )
             result["sample_id"] = sid
+            for field in ("instance_id", "stage", "qid", "cf_img_idx"):
+                if field in sample:
+                    result[field] = sample[field]
             records.append(result)
 
         with open(out_path, "w") as f:
@@ -189,6 +200,9 @@ def stage_steer(args, model, processor, steering_vector: torch.Tensor):
                 correct = is_match_fn(ans, sample["answer"])
                 r["is_correct_vanilla"] = correct
                 r["is_correct_steered"] = correct
+            for field in ("instance_id", "stage", "qid", "cf_img_idx"):
+                if field in sample:
+                    r[field] = sample[field]
             f.write(json.dumps(r) + "\n")
 
 
@@ -211,6 +225,12 @@ def main():
     parser.add_argument("--output_dir", default="results/revis/")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--vilp_mode", default="without_fact",
+                        choices=["without_fact", "with_fact"],
+                        help="ViLP prompt mode (default: without_fact)")
+    parser.add_argument("--vilp_images", default="cf_only",
+                        choices=["all", "cf_only"],
+                        help="ViLP image subset: cf_only=images 2+3 (default), all=all 3")
     args = parser.parse_args()
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

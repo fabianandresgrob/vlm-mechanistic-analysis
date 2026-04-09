@@ -38,7 +38,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chain_of_embedding.models.gemma3 import load_gemma3
-from data_loaders import get_is_match, load_vab, load_vilp, load_vlind_bench, load_vqav2
+from data_loaders import (get_is_match, load_vab, load_vilp_expanded,
+                          load_vlind_bench_lp, load_vqav2, compute_vlind_metrics)
 from eva.eva_decoding import eva_decode_dataset
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -74,6 +75,11 @@ def run_alpha(model, processor, samples, dataset, target_layer, alpha,
             r["is_correct_vanilla"] = is_match(r["vanilla_answer"], gt)
             r["is_correct_eva"] = is_match(r["eva_answer"], gt)
 
+        # Copy pipeline fields for VLind metric re-evaluation
+        for field in ("instance_id", "stage", "qid", "cf_img_idx"):
+            if field in s:
+                r[field] = s[field]
+
         # VAB-only: bias ratio
         if dataset == "vlms_are_biased":
             bias = s.get("expected_bias", "")
@@ -105,6 +111,23 @@ def run_alpha(model, processor, samples, dataset, target_layer, alpha,
             - sum(r.get("is_correct_vanilla", False) for r in results)
         ) / n,
     }
+
+    if dataset == "vlind":
+        # Compute accuracy_lp separately for vanilla and EVA conditions.
+        # s_lp (conditional on CK+VP+CB) requires a full 4-stage eval run;
+        # accuracy_lp is the raw LP-item accuracy and is computed here.
+        van_results = [{"instance_id": r["instance_id"], "stage": "lp",
+                        "qid": r["qid"], "cf_img_idx": r["cf_img_idx"],
+                        "is_correct": r.get("is_correct_vanilla", False)}
+                       for r in results if "instance_id" in r]
+        eva_results = [{"instance_id": r["instance_id"], "stage": "lp",
+                        "qid": r["qid"], "cf_img_idx": r["cf_img_idx"],
+                        "is_correct": r.get("is_correct_eva", False)}
+                       for r in results if "instance_id" in r]
+        summary["vlind_metric"] = "accuracy_lp"
+        summary["vanilla_accuracy_lp"] = compute_vlind_metrics(van_results)["accuracy_lp"]
+        summary["eva_accuracy_lp"]     = compute_vlind_metrics(eva_results)["accuracy_lp"]
+        summary["accuracy_lp_delta"]   = summary["eva_accuracy_lp"] - summary["vanilla_accuracy_lp"]
 
     if dataset == "vlms_are_biased":
         summary["vanilla_bias_ratio"] = sum(r.get("vanilla_matches_bias", False) for r in results) / n
@@ -145,6 +168,12 @@ def main():
     parser.add_argument("--max_new_tokens", type=int, default=3)
     parser.add_argument("--output_dir", default="results/eva_decoding/")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--vilp_mode", default="without_fact",
+                        choices=["without_fact", "with_fact"],
+                        help="ViLP prompt mode (default: without_fact)")
+    parser.add_argument("--vilp_images", default="cf_only",
+                        choices=["all", "cf_only"],
+                        help="ViLP image subset: cf_only=images 2+3 (default), all=all 3")
     args = parser.parse_args()
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -160,11 +189,11 @@ def main():
     if args.dataset == "vqav2":
         samples = load_vqav2(n_samples=n)
     elif args.dataset == "vlms_are_biased":
-        samples = load_vab(dataset_id=args.vab_dataset_id, split=args.vab_split, n_samples=n)
+        samples = load_vab(dataset_id=args.vab_dataset_id, split=args.vab_split, n_samples=n, resolution=1152)
     elif args.dataset == "vilp":
-        samples = load_vilp(n_samples=n)
+        samples = load_vilp_expanded(n_samples=n, mode=args.vilp_mode, images=args.vilp_images)
     elif args.dataset == "vlind":
-        samples = load_vlind_bench(n_samples=n)
+        samples = load_vlind_bench_lp(n_samples=n)
     logger.info("Loaded %d samples.", len(samples))
 
     logger.info("Loading %s…", args.model)

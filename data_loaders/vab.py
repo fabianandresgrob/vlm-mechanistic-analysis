@@ -43,18 +43,31 @@ def load_vab(
     dataset_id: str = "anvo25/vlms-are-biased",
     split: str = "main",
     n_samples: int | None = None,
+    resolution: int | None = 1152,
 ) -> list[dict]:
     """Load VAB samples.
 
+    The ``main`` split contains each (image, question) pair at 3 resolutions
+    (384, 768, 1152 px).  ``resolution`` filters to a single resolution to avoid
+    triple-counting concepts.  Use ``resolution=None`` to load all rows (matches
+    raw lmms-eval behaviour).
+
     Args:
-        dataset_id: HuggingFace dataset repo ID.
-        split:      Dataset split — use ``"main"`` (not ``"test"``).
-        n_samples:  Maximum number of samples to return.  ``None`` = all.
+        dataset_id:  HuggingFace dataset repo ID.
+        split:       Dataset split — use ``"main"`` (not ``"test"``).
+        n_samples:   Maximum number of samples to return after filtering.
+                     ``None`` = all.
+        resolution:  Keep only rows whose image filename ends in this resolution
+                     (e.g. 1152 → keeps ``*_1152.png`` / ``*_px1152.png``).
+                     Default is 1152 (highest resolution, per supervisor guidance).
+                     Pass ``None`` to disable filtering.
 
     Returns:
         List of sample dicts with keys: id, image, cf_image, messages, answer,
         expected_bias, topic, sub_topic.
     """
+    import re
+
     from datasets import load_dataset  # HuggingFace datasets
 
     logger.info("Loading VAB from %s / %s…", dataset_id, split)
@@ -62,8 +75,23 @@ def load_vab(
     if n_samples is not None:
         ds = ds.select(range(min(n_samples, len(ds))))
 
+    _res_pattern = re.compile(r"(?:_px|_)(\d+)\.(?:png|jpg)$", re.IGNORECASE)
+
     samples = []
     for item in ds:
+        if resolution is not None:
+            img_name = ""
+            # Try to get the filename from the image object
+            raw_img = item.get("image")
+            if hasattr(raw_img, "filename") and raw_img.filename:
+                img_name = raw_img.filename
+            # Fall back to the image_path field if present
+            if not img_name:
+                img_name = str(item.get("image_path") or "")
+            m = _res_pattern.search(img_name)
+            if m and int(m.group(1)) != resolution:
+                continue
+
         samples.append(
             {
                 "id": item.get("ID") or len(samples),

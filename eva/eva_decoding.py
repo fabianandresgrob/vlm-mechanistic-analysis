@@ -151,9 +151,9 @@ def eva_decode_sample(
     }
 
     if "answer" in sample and sample["answer"]:
-        gt = sample["answer"].strip().lower()
-        result["is_correct_vanilla"] = vanilla_answer.lower() == gt
-        result["is_correct_eva"] = eva_answer.lower() == gt
+        gt = sample["answer"]
+        result["is_correct_vanilla"] = vanilla_answer.lower() == gt.strip().lower()
+        result["is_correct_eva"] = eva_answer.lower() == gt.strip().lower()
 
     return result
 

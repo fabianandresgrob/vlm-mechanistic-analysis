@@ -22,7 +22,7 @@ is_match = get_is_match("vab")
 def build_gt_lookup() -> dict:
     """Load all VAB samples and return id -> ground_truth mapping."""
     print("Loading VAB ground truth...")
-    samples = load_vab()
+    samples = load_vab(resolution=None)  # need all 3 resolutions to match old result files
     return {s["id"]: s["answer"] for s in samples}
 
 

@@ -7,11 +7,17 @@ Coverage:
   - Schema validation: required fields present, correct types
   - Normalisation: answer/expected_bias stripped and lowercased
   - Messages structure: role="user", content=[image, text]
-  - cf_image handling: VAB/VQAv2 → None; ViLP/VLind → PIL or None
+  - cf_image handling: VAB/VQAv2 → None; ViLP CoE → PIL; ViLP expanded → None
   - VLind-Bench filesystem parsing (snapshot_download path, data.json, image paths)
   - expand_vlind_bench_stages: all four stages emitted, correct answers
   - to_contrastive_sample: ContrastiveSample fields match source dict
   - Script API compatibility: fields consumed by each run_*.py are present
+  - ViLP load_vilp(): 2 CF pairs per question, image=image1, cf_image=image2/3,
+    answer=answer1, cf_pair_idx, without_fact/with_fact modes, CoE compatibility
+  - ViLP load_vilp_expanded(): cf_only vs all modes, image_idx, answer per image
+  - ViLP compute_vilp_metrics(): vilp_score, vilp_prior, edge cases
+  - ViLP normalize_output(): number words, synonyms, plurals, trailing period
+  - ViLP is_match(): normalization pipeline, 'none' exclusion
 """
 from __future__ import annotations
 
@@ -165,62 +171,354 @@ class TestVABLoader:
 # ViLP
 # ---------------------------------------------------------------------------
 
+# Two questions:
+#   q0: has fact sentence, all 3 images present
+#   q1: no fact sentence (no "."), image3=None
 _VILP_ROWS = [
     {
-        "id": 0,
+        "question": "A drone typically has four rotors. How many rotors does the drone have?",
         "image1": _fake_pil(),
         "image2": _fake_pil(),
-        "question": "What color is the sky?",
-        "answer1": "Blue",
+        "image3": _fake_pil(),
+        "answer1": "Four",
+        "answer2": "Two",
+        "answer3": "Six",
     },
     {
-        "id": 1,
+        "question": "How many birds are in the tree?",
         "image1": _fake_pil(),
-        "image2": None,  # missing CF image — should be None
-        "question": "How many birds?",
+        "image2": _fake_pil(),
+        "image3": None,   # missing third image
         "answer1": "Three",
+        "answer2": "One",
+        "answer3": "",
     },
 ]
 
 
+def _load_vilp(n_samples=None, mode="without_fact"):
+    from data_loaders.vilp import load_vilp
+    ds = _FakeHFDataset(_VILP_ROWS)
+    with patch("datasets.load_dataset", return_value=ds):
+        return load_vilp(n_samples=n_samples, mode=mode)
+
+
+def _load_vilp_expanded(n_samples=None, mode="without_fact", images="cf_only"):
+    from data_loaders.vilp import load_vilp_expanded
+    ds = _FakeHFDataset(_VILP_ROWS)
+    with patch("datasets.load_dataset", return_value=ds):
+        return load_vilp_expanded(n_samples=n_samples, mode=mode, images=images)
+
+
 class TestViLPLoader:
-    def _load(self, n_samples=None):
-        from data_loaders.vilp import load_vilp
-        ds = _FakeHFDataset(_VILP_ROWS)
-        with patch("datasets.load_dataset", return_value=ds):
-            return load_vilp(n_samples=n_samples)
+    """Tests for load_vilp() — CoE CF-pair interface."""
+
+    def test_two_pairs_per_question(self):
+        """Each question yields exactly 2 CF pairs (cf2 and cf3)."""
+        samples = _load_vilp()
+        assert len(samples) == 4  # 2 questions × 2 pairs
+
+    def test_n_samples_limits_questions_not_pairs(self):
+        """n_samples=1 → 1 question → 2 pairs."""
+        samples = _load_vilp(n_samples=1)
+        assert len(samples) == 2
+
+    def test_cf_pair_idx_values(self):
+        """cf_pair_idx must be 2 or 3 for every sample."""
+        for s in _load_vilp():
+            assert s["cf_pair_idx"] in (2, 3), f"Unexpected cf_pair_idx: {s['cf_pair_idx']}"
+
+    def test_both_pairs_present_per_question(self):
+        """Each question_id must have exactly one cf2 and one cf3 sample."""
+        from collections import defaultdict
+        by_qid = defaultdict(set)
+        for s in _load_vilp():
+            by_qid[s["question_id"]].add(s["cf_pair_idx"])
+        for qid, idxs in by_qid.items():
+            assert idxs == {2, 3}, f"q{qid} missing a pair: {idxs}"
+
+    def test_image_is_image1_lp_aligned(self):
+        """image (vis condition) must be image1 for both pairs of a question."""
+        samples = _load_vilp(n_samples=1)   # q0 only → 2 pairs
+        # Both pairs for q0 share the same image1 — check they're PIL RGB
+        for s in samples:
+            assert isinstance(s["image"], PILImage.Image)
+            assert s["image"].mode == "RGB"
+
+    def test_cf_image_for_cf2_pair(self):
+        """cf_image must be image2 for cf_pair_idx=2."""
+        samples = _load_vilp()
+        cf2 = [s for s in samples if s["cf_pair_idx"] == 2]
+        for s in cf2:
+            assert isinstance(s["cf_image"], PILImage.Image)
+
+    def test_cf_image_none_when_image3_missing(self):
+        """If image3 is None in the dataset, cf_image=None for cf3 pair."""
+        samples = _load_vilp()
+        # q1 (question_id=1) has image3=None
+        cf3_q1 = [s for s in samples if s["question_id"] == 1 and s["cf_pair_idx"] == 3]
+        assert len(cf3_q1) == 1
+        assert cf3_q1[0]["cf_image"] is None
+
+    def test_answer_is_answer1(self):
+        """answer must always be answer1 (LP-aligned ground truth)."""
+        samples = _load_vilp()
+        # q0 answer1="Four" → normalized "4"
+        q0 = [s for s in samples if s["question_id"] == 0]
+        for s in q0:
+            assert s["answer"] == "4"    # "Four" → number mapping
+        # q1 answer1="Three" → normalized "3"
+        q1 = [s for s in samples if s["question_id"] == 1]
+        for s in q1:
+            assert s["answer"] == "3"
+
+    def test_answer1_answer2_answer3_all_present(self):
+        """answer1/2/3 fields must be present for downstream use."""
+        for s in _load_vilp():
+            assert "answer1" in s
+            assert "answer2" in s
+            assert "answer3" in s
+
+    def test_id_format(self):
+        """id must follow '{q_idx}_cf2' / '{q_idx}_cf3' format."""
+        samples = _load_vilp()
+        ids = {s["id"] for s in samples}
+        assert "0_cf2" in ids
+        assert "0_cf3" in ids
+        assert "1_cf2" in ids
+        assert "1_cf3" in ids
 
     def test_schema(self):
-        for s in self._load():
-            _validate_base_schema(s, dataset="ViLP")
+        for s in _load_vilp():
+            _validate_base_schema(s, dataset="ViLP-CoE")
 
-    def test_image_is_rgb(self):
-        samples = self._load()
-        assert samples[0]["image"].mode == "RGB"
-
-    def test_cf_image_present_when_available(self):
-        samples = self._load()
-        assert isinstance(samples[0]["cf_image"], PILImage.Image)
-
-    def test_cf_image_none_when_missing(self):
-        """image2=None → cf_image=None (no crash)."""
-        samples = self._load()
-        assert samples[1]["cf_image"] is None
-
-    def test_prompt_format(self):
-        """Question must be wrapped in the one-word-answer prefix."""
-        samples = self._load()
+    def test_without_fact_strips_leading_sentence(self):
+        """without_fact mode removes the first sentence (the LP fact)."""
+        samples = _load_vilp(mode="without_fact", n_samples=1)
         text = samples[0]["messages"][0]["content"][1]["text"]
-        assert text.startswith("Please answer with one word:")
-        assert "What color is the sky?" in text
+        # Fact sentence must be gone
+        assert "A drone typically has four rotors." not in text
+        # Question must remain
+        assert "How many rotors" in text
 
-    def test_answer_lowercased(self):
-        samples = self._load()
-        assert samples[0]["answer"] == "blue"
-        assert samples[1]["answer"] == "three"
+    def test_with_fact_keeps_full_question(self):
+        """with_fact mode keeps the entire question including the fact sentence."""
+        samples = _load_vilp(mode="with_fact", n_samples=1)
+        text = samples[0]["messages"][0]["content"][1]["text"]
+        assert "A drone typically has four rotors." in text
+        assert "How many rotors" in text
 
-    def test_n_samples_respected(self):
-        assert len(self._load(n_samples=1)) == 1
+    def test_no_fact_sentence_question_unmodified(self):
+        """Questions with no '.' are unchanged regardless of mode."""
+        samples_wof = _load_vilp(mode="without_fact")
+        samples_wf = _load_vilp(mode="with_fact")
+        q1_wof = [s for s in samples_wof if s["question_id"] == 1][0]
+        q1_wf  = [s for s in samples_wf  if s["question_id"] == 1][0]
+        text_wof = q1_wof["messages"][0]["content"][1]["text"]
+        text_wf  = q1_wf ["messages"][0]["content"][1]["text"]
+        assert text_wof == text_wf
+        assert "How many birds" in text_wof
+
+    def test_prompt_prefix(self):
+        for s in _load_vilp():
+            text = s["messages"][0]["content"][1]["text"]
+            assert text.startswith("Please answer with one word:")
+
+    def test_coe_compatible_via_to_contrastive_sample(self):
+        """load_vilp() output can be passed directly to to_contrastive_sample."""
+        from data_loaders import to_contrastive_sample
+        for raw in _load_vilp(n_samples=1):
+            cs = to_contrastive_sample(raw)
+            assert cs.id is not None
+            assert isinstance(cs.image, PILImage.Image)
+            # cf_image may be PIL or None — both are valid
+            assert cs.cf_image is None or isinstance(cs.cf_image, PILImage.Image)
+            assert cs.answer  # non-empty answer1
+
+
+class TestViLPExpandedLoader:
+    """Tests for load_vilp_expanded() — eval experiment interface."""
+
+    def test_cf_only_returns_two_per_question(self):
+        """images='cf_only' → images 2+3, so 2 samples per question."""
+        samples = _load_vilp_expanded(images="cf_only")
+        assert len(samples) == 4   # 2 questions × 2 images
+
+    def test_all_returns_three_per_question(self):
+        """images='all' → all 3 images, so 3 samples per question."""
+        samples = _load_vilp_expanded(images="all")
+        assert len(samples) == 6   # 2 questions × 3 images
+
+    def test_cf_only_image_indices(self):
+        """cf_only: image_idx must be 2 or 3 only."""
+        for s in _load_vilp_expanded(images="cf_only"):
+            assert s["image_idx"] in (2, 3)
+
+    def test_all_image_indices(self):
+        """all: image_idx must be 1, 2, or 3."""
+        for s in _load_vilp_expanded(images="all"):
+            assert s["image_idx"] in (1, 2, 3)
+
+    def test_answer_matches_image_idx(self):
+        """answer must correspond to the answer for that image index."""
+        samples = _load_vilp_expanded(images="all", n_samples=1)  # q0 only
+        by_idx = {s["image_idx"]: s["answer"] for s in samples}
+        assert by_idx[1] == "4"   # answer1="Four" → "4"
+        assert by_idx[2] == "2"   # answer2="Two"  → "2"
+        assert by_idx[3] == "6"   # answer3="Six"  → "6"
+
+    def test_cf_image_is_none(self):
+        """cf_image must always be None in expanded loader."""
+        for s in _load_vilp_expanded(images="all"):
+            assert s["cf_image"] is None
+
+    def test_id_format(self):
+        """id must follow '{q_idx}_img{img_idx}'."""
+        samples = _load_vilp_expanded(images="all", n_samples=1)
+        ids = {s["id"] for s in samples}
+        assert "0_img1" in ids
+        assert "0_img2" in ids
+        assert "0_img3" in ids
+
+    def test_schema(self):
+        for s in _load_vilp_expanded(images="all"):
+            _validate_base_schema(s, dataset="ViLP-expanded")
+
+    def test_without_fact_strips_leading_sentence(self):
+        samples = _load_vilp_expanded(mode="without_fact", images="all", n_samples=1)
+        for s in samples:
+            text = s["messages"][0]["content"][1]["text"]
+            assert "A drone typically has four rotors." not in text
+            assert "How many rotors" in text
+
+    def test_with_fact_keeps_full_question(self):
+        samples = _load_vilp_expanded(mode="with_fact", images="all", n_samples=1)
+        for s in samples:
+            text = s["messages"][0]["content"][1]["text"]
+            assert "A drone typically has four rotors." in text
+
+    def test_n_samples_limits_questions(self):
+        """n_samples=1 → only q0, so 2 samples for cf_only."""
+        samples = _load_vilp_expanded(n_samples=1, images="cf_only")
+        assert len(samples) == 2
+        assert all(s["question_id"] == 0 for s in samples)
+
+    def test_script_api_fields_present(self):
+        """Fields consumed by run_eva_decoding / run_revis / run_steering."""
+        required = {"id", "image", "cf_image", "messages", "answer", "image_idx", "question_id"}
+        for s in _load_vilp_expanded():
+            assert required <= s.keys(), f"Missing: {required - s.keys()}"
+
+
+class TestViLPMetrics:
+    """Tests for compute_vilp_metrics()."""
+
+    def _results(self, records):
+        from data_loaders.vilp import compute_vilp_metrics
+        return compute_vilp_metrics(records)
+
+    def test_vilp_score_cf_images_only(self):
+        """vilp_score = mean acc over image_idx 2+3."""
+        records = [
+            {"image_idx": 2, "is_correct": True},
+            {"image_idx": 3, "is_correct": False},
+            {"image_idx": 2, "is_correct": True},
+            {"image_idx": 3, "is_correct": True},
+        ]
+        m = self._results(records)
+        assert m["vilp_score"] == pytest.approx(3 / 4)
+
+    def test_vilp_prior_image1(self):
+        """vilp_prior = acc over image_idx 1."""
+        records = [
+            {"image_idx": 1, "is_correct": True},
+            {"image_idx": 1, "is_correct": True},
+            {"image_idx": 2, "is_correct": False},
+        ]
+        m = self._results(records)
+        assert m["vilp_prior"] == pytest.approx(1.0)
+
+    def test_vilp_prior_none_when_no_image1(self):
+        """vilp_prior is None when no image_idx=1 samples are present."""
+        records = [
+            {"image_idx": 2, "is_correct": True},
+            {"image_idx": 3, "is_correct": False},
+        ]
+        m = self._results(records)
+        assert m["vilp_prior"] is None
+
+    def test_perfect_score(self):
+        records = [{"image_idx": i, "is_correct": True} for i in [2, 3, 2, 3]]
+        assert self._results(records)["vilp_score"] == pytest.approx(1.0)
+
+    def test_zero_score(self):
+        records = [{"image_idx": i, "is_correct": False} for i in [2, 3]]
+        assert self._results(records)["vilp_score"] == pytest.approx(0.0)
+
+    def test_empty_returns_zero(self):
+        m = self._results([])
+        assert m["vilp_score"] == 0.0
+
+
+class TestViLPNormalizeOutput:
+    """Tests for normalize_output — ported from lmms-eval."""
+
+    def _n(self, s):
+        from data_loaders.vilp import normalize_output
+        return normalize_output(s)
+
+    def test_lowercase_and_strip(self):
+        assert self._n("  Blue  ") == "blue"
+
+    def test_trailing_period_removed(self):
+        assert self._n("blue.") == "blue"
+
+    def test_number_word_to_digit(self):
+        assert self._n("Four") == "4"
+        assert self._n("twelve") == "12"
+
+    def test_synonym_mapping(self):
+        assert self._n("refrigerator") == "fridge"
+        assert self._n("automobile") == "car"
+
+    def test_plural_to_singular(self):
+        assert self._n("cats") == "cat"
+        assert self._n("butterflies") == "butterfly"
+
+    def test_unknown_word_unchanged(self):
+        assert self._n("xyzzy") == "xyzzy"
+
+
+class TestViLPIsMatchUpdated:
+    """Extended tests for is_match — number words, synonyms, 'none' exclusion."""
+
+    def _m(self, pred, target):
+        from data_loaders.vilp import is_match
+        return is_match(pred, target)
+
+    def test_exact_match(self):
+        assert self._m("blue", "blue")
+
+    def test_case_insensitive(self):
+        assert self._m("Blue", "blue")
+
+    def test_number_word_match(self):
+        assert self._m("four", "4")
+        assert self._m("Four", "4")
+
+    def test_synonym_match(self):
+        assert self._m("automobile", "car")
+        assert self._m("refrigerator", "fridge")
+
+    def test_plural_match(self):
+        assert self._m("cats", "cat")
+
+    def test_no_match(self):
+        assert not self._m("blue", "red")
+
+    def test_none_excluded(self):
+        """Predictions normalizing to 'none' must never be counted as correct."""
+        assert not self._m("none", "none")
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +727,204 @@ class TestExpandVLindBenchStages:
         assert len(lp_items) == 4  # 2 good_ids × 2 qids
 
 
+class TestVLindBenchLPLoader:
+    """Tests for load_vlind_bench_lp() — LP eval interface used by run scripts."""
+
+    def _load(self, vlind_fixture, n_samples=None):
+        from data_loaders.vlind_bench import load_vlind_bench_lp
+        with patch("huggingface_hub.snapshot_download", return_value=str(vlind_fixture)):
+            return load_vlind_bench_lp(n_samples=n_samples)
+
+    def test_count_two_qids_per_good_image(self, vlind_fixture):
+        """swan has 2 good CF images × 2 qids = 4 LP items; panda has no CF dir → 0."""
+        samples = self._load(vlind_fixture)
+        assert len(samples) == 4
+
+    def test_n_samples_limits_instances(self, vlind_fixture):
+        """n_samples=1 → only the first instance (swan), still 4 items."""
+        samples = self._load(vlind_fixture, n_samples=1)
+        assert len(samples) == 4
+
+    def test_id_format(self, vlind_fixture):
+        """id must follow '{instance_id}_lp_{cf_img_idx}_{qid}'."""
+        samples = self._load(vlind_fixture)
+        ids = {s["id"] for s in samples}
+        assert "0_lp_0_q1" in ids
+        assert "0_lp_0_q2" in ids
+        assert "0_lp_1_q1" in ids
+        assert "0_lp_1_q2" in ids
+
+    def test_stage_and_qid_fields(self, vlind_fixture):
+        """stage must be 'lp'; qid must be 'q1' or 'q2'."""
+        for s in self._load(vlind_fixture):
+            assert s["stage"] == "lp"
+            assert s["qid"] in ("q1", "q2")
+
+    def test_cf_img_idx_matches_good_ids(self, vlind_fixture):
+        """cf_img_idx must be one of the good CF image ids (0 or 1 for swan)."""
+        for s in self._load(vlind_fixture):
+            assert s["cf_img_idx"] in (0, 1)
+
+    def test_answer_q1_true_q2_false(self, vlind_fixture):
+        """q1 → answer='true', q2 → answer='false'."""
+        for s in self._load(vlind_fixture):
+            if s["qid"] == "q1":
+                assert s["answer"] == "true"
+            else:
+                assert s["answer"] == "false"
+
+    def test_image_is_cf_image_rgb(self, vlind_fixture):
+        """image must be the CF image (PIL RGB), not the factual image."""
+        for s in self._load(vlind_fixture):
+            assert isinstance(s["image"], PILImage.Image)
+            assert s["image"].mode == "RGB"
+
+    def test_cf_image_is_none(self, vlind_fixture):
+        """cf_image must always be None (eval loader, no contrastive pair needed)."""
+        for s in self._load(vlind_fixture):
+            assert s["cf_image"] is None
+
+    def test_q1_prompt_uses_true_statement(self, vlind_fixture):
+        """q1 prompt must contain true_statement ('Swans are in the desert.')."""
+        q1 = [s for s in self._load(vlind_fixture) if s["qid"] == "q1"]
+        for s in q1:
+            text = s["messages"][0]["content"][1]["text"]
+            assert "Swans are in the desert." in text
+
+    def test_q2_prompt_uses_false_statement(self, vlind_fixture):
+        """q2 prompt must contain false_statement ('Swans are in the lake.')."""
+        q2 = [s for s in self._load(vlind_fixture) if s["qid"] == "q2"]
+        for s in q2:
+            text = s["messages"][0]["content"][1]["text"]
+            assert "Swans are in the lake." in text
+
+    def test_lp_prompt_instructs_follow_image(self, vlind_fixture):
+        """LP prompt must tell the model to follow the image, not common sense."""
+        for s in self._load(vlind_fixture):
+            text = s["messages"][0]["content"][1]["text"]
+            assert "follow the information provided in the image" in text
+            assert "Forget real-world common sense" in text
+
+    def test_pipeline_fields_present(self, vlind_fixture):
+        """instance_id, stage, qid, cf_img_idx must all be present for compute_vlind_metrics."""
+        required = {"instance_id", "stage", "qid", "cf_img_idx"}
+        for s in self._load(vlind_fixture):
+            assert required <= s.keys(), f"Missing pipeline fields: {required - s.keys()}"
+
+    def test_schema(self, vlind_fixture):
+        for s in self._load(vlind_fixture):
+            _validate_base_schema(s, dataset="VLind-LP")
+
+    def test_script_api_fields(self, vlind_fixture):
+        """Fields consumed by run_revis / run_steering / run_eva_decoding."""
+        required = {"id", "image", "messages", "answer",
+                    "instance_id", "stage", "qid", "cf_img_idx"}
+        for s in self._load(vlind_fixture):
+            assert required <= s.keys(), f"Missing: {required - s.keys()}"
+
+
+class TestComputeVLindMetrics:
+    """Tests for compute_vlind_metrics() — pipeline aggregation matching lmms-eval."""
+
+    def _m(self, records):
+        from data_loaders.vlind_bench import compute_vlind_metrics
+        return compute_vlind_metrics(records)
+
+    def _lp(self, instance_id, cf_img_idx, q1_correct, q2_correct):
+        """Helper: return q1+q2 LP result dicts for one image."""
+        return [
+            {"instance_id": instance_id, "stage": "lp", "qid": "q1",
+             "cf_img_idx": cf_img_idx, "is_correct": q1_correct},
+            {"instance_id": instance_id, "stage": "lp", "qid": "q2",
+             "cf_img_idx": cf_img_idx, "is_correct": q2_correct},
+        ]
+
+    def _stage(self, instance_id, stage, q1_correct, q2_correct):
+        """Helper: return q1+q2 result dicts for a non-LP stage."""
+        return [
+            {"instance_id": instance_id, "stage": stage, "qid": "q1",
+             "cf_img_idx": -1, "is_correct": q1_correct},
+            {"instance_id": instance_id, "stage": stage, "qid": "q2",
+             "cf_img_idx": -1, "is_correct": q2_correct},
+        ]
+
+    def test_accuracy_lp_from_lp_only(self):
+        """accuracy_lp is computable from LP results alone."""
+        records = (self._lp(0, 0, True, True) +   # both correct
+                   self._lp(0, 1, True, False) +   # q2 wrong
+                   self._lp(1, 0, False, False))    # both wrong
+        m = self._m(records)
+        # 3 correct out of 6 LP items
+        assert m["accuracy_lp"] == pytest.approx(3 / 6)
+
+    def test_s_ck_pass_rate(self):
+        records = (self._stage(0, "ck", True, True) +   # passes
+                   self._stage(1, "ck", True, False))    # q2 fails
+        m = self._m(records)
+        assert m["s_ck"] == pytest.approx(0.5)
+
+    def test_s_vp_pass_rate(self):
+        records = (self._stage(0, "vp", True, True) +
+                   self._stage(1, "vp", True, True))
+        m = self._m(records)
+        assert m["s_vp"] == pytest.approx(1.0)
+
+    def test_s_cb_conditional_on_ck(self):
+        """s_cb denominator = CK-passing instances only."""
+        records = (
+            self._stage(0, "ck", True,  True)  +   # CK passes
+            self._stage(0, "cb", True,  True)  +   # CB passes
+            self._stage(1, "ck", True,  False) +   # CK fails
+            self._stage(1, "cb", True,  True)       # CB passes but doesn't count
+        )
+        m = self._m(records)
+        # Only instance 0 passes CK; it also passes CB → s_cb = 1/1 = 1.0
+        assert m["s_cb"] == pytest.approx(1.0)
+
+    def test_s_cb_none_when_no_ck_passes(self):
+        records = self._stage(0, "cb", True, True)  # no CK items
+        m = self._m(records)
+        assert m["s_cb"] is None
+
+    def test_s_lp_conditional_on_ck_vp_cb(self):
+        """s_lp only counts instances where CK+VP+CB all pass."""
+        records = (
+            self._stage(0, "ck", True, True) +
+            self._stage(0, "vp", True, True) +
+            self._stage(0, "cb", True, True) +
+            self._lp(0, 0, True, True) +     # image 0: both correct → pass
+            self._lp(0, 1, True, False) +    # image 1: q2 wrong → fail
+            # instance 1: CK fails → doesn't qualify
+            self._stage(1, "ck", True, False) +
+            self._stage(1, "vp", True, True) +
+            self._stage(1, "cb", True, True) +
+            self._lp(1, 0, True, True)
+        )
+        m = self._m(records)
+        # Only instance 0 qualifies; 1 of 2 LP images pass → s_lp = 0.5
+        assert m["s_lp"] == pytest.approx(0.5)
+        assert m["n_lp_qualifying"] == 1
+
+    def test_s_lp_none_when_no_instance_qualifies(self):
+        """s_lp is None when no instance passes CK+VP+CB."""
+        records = self._lp(0, 0, True, True)   # LP items but no CK/VP/CB
+        m = self._m(records)
+        assert m["s_lp"] is None
+
+    def test_empty_returns_zeros(self):
+        m = self._m([])
+        assert m["s_ck"] == 0.0
+        assert m["s_vp"] == 0.0
+        assert m["accuracy_lp"] == 0.0
+        assert m["s_cb"] is None
+        assert m["s_lp"] is None
+
+    def test_n_instances_count(self):
+        records = (self._stage(0, "ck", True, True) +
+                   self._stage(1, "ck", False, True))
+        assert self._m(records)["n_instances"] == 2
+
+
 # ---------------------------------------------------------------------------
 # to_contrastive_sample
 # ---------------------------------------------------------------------------
@@ -508,42 +1004,45 @@ class TestVABIsMatch:
         assert not vab_is_match("", "yes")
 
 
-class TestViLPIsMatch:
-    def test_exact_match(self):
-        from data_loaders import vilp_is_match
-        assert vilp_is_match("blue", "blue")
-
-    def test_case_insensitive(self):
-        from data_loaders import vilp_is_match
-        assert vilp_is_match("Blue", "blue")
-        assert vilp_is_match("BLUE", "blue")
-
-    def test_whitespace_stripped(self):
-        from data_loaders import vilp_is_match
-        assert vilp_is_match("  blue  ", "blue")
-
-    def test_no_match(self):
-        from data_loaders import vilp_is_match
-        assert not vilp_is_match("blue", "red")
-        assert not vilp_is_match("three", "four")
-
-
 class TestVLindIsMatch:
-    def test_true_false(self):
+    """Tests for is_match — word-scan extraction matching lmms-eval infer_true_or_false."""
+
+    def _m(self, pred, target):
         from data_loaders import vlind_is_match
-        assert vlind_is_match("true", "true")
-        assert vlind_is_match("false", "false")
+        return vlind_is_match(pred, target)
+
+    def test_exact_match(self):
+        assert self._m("true", "true")
+        assert self._m("false", "false")
 
     def test_case_insensitive(self):
-        from data_loaders import vlind_is_match
-        assert vlind_is_match("True", "true")
-        assert vlind_is_match("False", "false")
-        assert vlind_is_match("TRUE", "true")
+        assert self._m("True", "true")
+        assert self._m("False", "false")
+        assert self._m("TRUE", "true")
 
     def test_no_match(self):
-        from data_loaders import vlind_is_match
-        assert not vlind_is_match("true", "false")
-        assert not vlind_is_match("false", "true")
+        assert not self._m("true", "false")
+        assert not self._m("false", "true")
+
+    def test_word_scan_long_output(self):
+        """First 'true'/'false' word in output is used — handles verbose model outputs."""
+        assert self._m("True, the statement is consistent with the image.", "true")
+        assert self._m("False. The image shows something different.", "false")
+
+    def test_word_scan_extracts_first_occurrence(self):
+        """First matching word wins even if another follows."""
+        assert self._m("I think it is true but could be false", "true")
+
+    def test_word_scan_no_true_false_returns_false(self):
+        """No 'true'/'false' word found → never matches."""
+        assert not self._m("yes", "true")
+        assert not self._m("", "true")
+        assert not self._m("I don't know", "false")
+
+    def test_trailing_period_handled(self):
+        """'True.' — period removed by word scan before comparison."""
+        assert self._m("True.", "true")
+        assert self._m("False.", "false")
 
 
 class TestGetIsMatch:
@@ -638,6 +1137,66 @@ class TestScriptAPICompatibility:
         _ = s["image"]
         _ = s["messages"]
 
+    def _vlind_lp_sample(self):
+        """Minimal VLind LP sample as returned by load_vlind_bench_lp()."""
+        return {
+            "id": "0_lp_0_q1",
+            "image": _fake_pil(),
+            "cf_image": None,
+            "messages": [{"role": "user", "content": [
+                {"type": "image"}, {"type": "text", "text": "Statement: X\nTrue or False?"}
+            ]}],
+            "answer": "true",
+            "instance_id": 0,
+            "stage": "lp",
+            "qid": "q1",
+            "cf_img_idx": 0,
+        }
+
+    def test_vlind_lp_run_revis_fields(self):
+        """run_revis.py stage_steer: sample["id"], sample["image"], pipeline fields."""
+        s = self._vlind_lp_sample()
+        _ = s["id"]
+        _ = s["image"]
+        _ = s["messages"]
+        _ = s.get("answer", "")
+        for field in ("instance_id", "stage", "qid", "cf_img_idx"):
+            assert field in s, f"Pipeline field {field!r} missing from VLind LP sample"
+
+    def test_vlind_lp_run_steering_fields(self):
+        """run_steering.py: same pipeline fields, plus category (optional)."""
+        s = self._vlind_lp_sample()
+        _ = s.get("id")
+        _ = s.get("category", "")
+        for field in ("instance_id", "stage", "qid", "cf_img_idx"):
+            assert field in s
+
+    def test_vlind_lp_run_eva_decoding_fields(self):
+        """run_eva_decoding.py: id, answer, pipeline fields."""
+        s = self._vlind_lp_sample()
+        _ = s["id"]
+        _ = s.get("answer", "")
+        for field in ("instance_id", "stage", "qid", "cf_img_idx"):
+            assert field in s
+
+    def test_vlind_lp_pipeline_fields_propagate_to_record(self):
+        """Simulate the field-copy pattern used in all three run scripts."""
+        s = self._vlind_lp_sample()
+        record = {"id": s["id"], "vanilla_answer": "true", "is_correct_vanilla": True}
+        for field in ("instance_id", "stage", "qid", "cf_img_idx"):
+            if field in s:
+                record[field] = s[field]
+        # compute_vlind_metrics requires these fields on every record
+        from data_loaders.vlind_bench import compute_vlind_metrics
+        metrics = compute_vlind_metrics([{
+            "instance_id": record["instance_id"],
+            "stage": record["stage"],
+            "qid": record["qid"],
+            "cf_img_idx": record["cf_img_idx"],
+            "is_correct": record["is_correct_vanilla"],
+        }])
+        assert metrics["accuracy_lp"] == pytest.approx(1.0)
+
 
 # ---------------------------------------------------------------------------
 # Real download tests  (pytest --download)
@@ -690,40 +1249,103 @@ class TestVABDownload:
 
 @pytest.mark.download
 class TestViLPDownload:
-    """Load 2 real samples from ViLP/ViLP and check the schema."""
+    """Load real samples from ViLP/ViLP and check both loader interfaces."""
 
-    def test_real_samples_schema(self):
-        from data_loaders import load_vilp
-        samples = load_vilp(n_samples=2)
-        assert len(samples) == 2
-        for s in samples:
-            _validate_base_schema(s, dataset="ViLP-real")
+    # --- load_vilp (CoE CF-pair interface) ---
 
-    def test_real_image1_is_pil_rgb(self):
+    def test_coe_two_pairs_per_question(self):
+        """load_vilp(n_samples=3) → 6 samples (3 questions × 2 CF pairs)."""
         from data_loaders import load_vilp
-        samples = load_vilp(n_samples=2)
-        for s in samples:
+        samples = load_vilp(n_samples=3)
+        assert len(samples) == 6
+
+    def test_coe_schema(self):
+        from data_loaders import load_vilp
+        for s in load_vilp(n_samples=2):
+            _validate_base_schema(s, dataset="ViLP-CoE-real")
+
+    def test_coe_image_is_image1_rgb(self):
+        from data_loaders import load_vilp
+        for s in load_vilp(n_samples=2):
             assert isinstance(s["image"], PILImage.Image)
             assert s["image"].mode == "RGB"
 
-    def test_real_cf_image_is_pil_or_none(self):
+    def test_coe_cf_image_is_pil_or_none(self):
         from data_loaders import load_vilp
-        samples = load_vilp(n_samples=5)
-        for s in samples:
+        for s in load_vilp(n_samples=5):
             assert s["cf_image"] is None or isinstance(s["cf_image"], PILImage.Image)
 
-    def test_real_prompt_wraps_question(self):
+    def test_coe_cf_pair_idx_values(self):
         from data_loaders import load_vilp
-        samples = load_vilp(n_samples=2)
-        for s in samples:
+        for s in load_vilp(n_samples=3):
+            assert s["cf_pair_idx"] in (2, 3)
+
+    def test_coe_answer_is_answer1(self):
+        """answer must equal answer1 for every sample."""
+        from data_loaders import load_vilp
+        for s in load_vilp(n_samples=3):
+            assert s["answer"] == s["answer1"], (
+                f"answer {s['answer']!r} != answer1 {s['answer1']!r} in {s['id']}"
+            )
+
+    def test_coe_without_fact_strips_sentence(self):
+        """without_fact prompt must not contain a leading sentence ending in '.'
+        before the actual question."""
+        from data_loaders import load_vilp
+        samples_wof = load_vilp(n_samples=2, mode="without_fact")
+        samples_wf  = load_vilp(n_samples=2, mode="with_fact")
+        # At least one question must have a fact sentence → prompts differ
+        texts_wof = [s["messages"][0]["content"][1]["text"] for s in samples_wof]
+        texts_wf  = [s["messages"][0]["content"][1]["text"] for s in samples_wf]
+        assert any(wof != wf for wof, wf in zip(texts_wof, texts_wf)), (
+            "Expected at least one question where without_fact != with_fact"
+        )
+
+    def test_coe_prompt_prefix(self):
+        from data_loaders import load_vilp
+        for s in load_vilp(n_samples=2):
             text = s["messages"][0]["content"][1]["text"]
             assert text.startswith("Please answer with one word:")
 
-    def test_real_answer_non_empty(self):
-        from data_loaders import load_vilp
-        samples = load_vilp(n_samples=5)
+    # --- load_vilp_expanded (eval interface) ---
+
+    def test_expanded_cf_only_count(self):
+        """cf_only, n=3 → 6 samples (3 questions × 2 images)."""
+        from data_loaders import load_vilp_expanded
+        samples = load_vilp_expanded(n_samples=3, images="cf_only")
+        assert len(samples) == 6
+
+    def test_expanded_all_count(self):
+        """images='all', n=3 → 9 samples (3 questions × 3 images)."""
+        from data_loaders import load_vilp_expanded
+        samples = load_vilp_expanded(n_samples=3, images="all")
+        assert len(samples) == 9
+
+    def test_expanded_schema(self):
+        from data_loaders import load_vilp_expanded
+        for s in load_vilp_expanded(n_samples=2, images="all"):
+            _validate_base_schema(s, dataset="ViLP-expanded-real")
+
+    def test_expanded_cf_only_image_indices(self):
+        from data_loaders import load_vilp_expanded
+        for s in load_vilp_expanded(n_samples=3, images="cf_only"):
+            assert s["image_idx"] in (2, 3)
+
+    def test_expanded_all_image_indices(self):
+        from data_loaders import load_vilp_expanded
+        for s in load_vilp_expanded(n_samples=3, images="all"):
+            assert s["image_idx"] in (1, 2, 3)
+
+    def test_expanded_cf_image_always_none(self):
+        from data_loaders import load_vilp_expanded
+        for s in load_vilp_expanded(n_samples=3, images="all"):
+            assert s["cf_image"] is None
+
+    def test_expanded_answer_non_empty(self):
+        from data_loaders import load_vilp_expanded
+        samples = load_vilp_expanded(n_samples=5, images="all")
         non_empty = [s for s in samples if s["answer"]]
-        assert len(non_empty) > 0, "Expected at least some non-empty answers"
+        assert len(non_empty) > 0
 
 
 @pytest.mark.download
@@ -823,3 +1445,143 @@ class TestVLindBenchDownload:
         # Every item has _image_path field
         for it in items:
             assert "_image_path" in it
+
+
+@pytest.mark.download
+class TestVLindBenchLPDownload:
+    """Download tests for load_vlind_bench_lp() — run on server where dataset is cached."""
+
+    @pytest.fixture(scope="class")
+    def lp_samples(self):
+        from data_loaders import load_vlind_bench_lp
+        return load_vlind_bench_lp(n_samples=3)
+
+    def test_returns_samples(self, lp_samples):
+        assert len(lp_samples) > 0, (
+            "load_vlind_bench_lp returned 0 samples — check HuggingFace download."
+        )
+
+    def test_multiple_items_per_instance(self, lp_samples):
+        """3 instances × good_CF_images × 2 questions → more than 3 items."""
+        assert len(lp_samples) > 3, (
+            f"Expected more than 3 LP items for 3 instances, got {len(lp_samples)}"
+        )
+
+    def test_schema(self, lp_samples):
+        for s in lp_samples:
+            _validate_base_schema(s, dataset="VLind-Bench-LP-real")
+
+    def test_pipeline_fields_present(self, lp_samples):
+        for s in lp_samples:
+            assert "instance_id" in s, "instance_id missing"
+            assert "stage" in s, "stage missing"
+            assert "qid" in s, "qid missing"
+            assert "cf_img_idx" in s, "cf_img_idx missing"
+            assert s["stage"] == "lp"
+            assert s["qid"] in (1, 2)
+
+    def test_cf_image_is_real_jpeg(self, lp_samples):
+        """LP loader uses CF images as primary image — must be real PIL images."""
+        for s in lp_samples:
+            assert isinstance(s["image"], PILImage.Image), "image must be a PIL Image"
+            w, h = s["image"].size
+            assert w >= 64 and h >= 64, f"Suspiciously small image: {w}×{h}"
+
+    def test_cf_image_field_is_none(self, lp_samples):
+        """LP items have no secondary CF image (the CF image IS the primary image)."""
+        for s in lp_samples:
+            assert s["cf_image"] is None, "cf_image should be None for LP samples"
+
+    def test_answers_are_true_or_false(self, lp_samples):
+        answers = {s["answer"] for s in lp_samples}
+        assert answers <= {"true", "false"}, f"Unexpected answers: {answers}"
+        # Both values should appear across enough samples
+        assert "true" in answers, "No 'true' answers found"
+        assert "false" in answers, "No 'false' answers found"
+
+    def test_q1_answer_true_q2_answer_false(self, lp_samples):
+        """q1 asks about the true statement (answer='true'), q2 about the false one."""
+        for s in lp_samples:
+            if s["qid"] == 1:
+                assert s["answer"] == "true", f"q1 should have answer='true', got {s['answer']}"
+            elif s["qid"] == 2:
+                assert s["answer"] == "false", f"q2 should have answer='false', got {s['answer']}"
+
+    def test_lp_prompt_instructs_follow_image(self, lp_samples):
+        """LP prompt must contain the lmms-eval instruction to follow the image."""
+        for s in lp_samples:
+            text = s["messages"][0]["content"][1]["text"]
+            assert "Forget real-world common sense" in text, (
+                "LP prompt missing image-follow instruction"
+            )
+            assert "True or False" in text
+            assert "Statement:" in text
+
+    def test_id_format(self, lp_samples):
+        """ID format: {instance_id}_lp_{cf_img_idx}_{qid}."""
+        for s in lp_samples:
+            iid = s["instance_id"]
+            cidx = s["cf_img_idx"]
+            qid = s["qid"]
+            expected_suffix = f"_lp_{cidx}_{qid}"
+            assert s["id"].endswith(expected_suffix), (
+                f"ID {s['id']!r} should end with {expected_suffix!r}"
+            )
+
+    def test_n_samples_limits_instances(self):
+        """n_samples limits the number of source instances, not LP items."""
+        from data_loaders import load_vlind_bench_lp
+        small = load_vlind_bench_lp(n_samples=2)
+        big = load_vlind_bench_lp(n_samples=5)
+        # Distinct instance_ids should respect the limit
+        small_instances = {s["instance_id"] for s in small}
+        big_instances = {s["instance_id"] for s in big}
+        assert len(small_instances) <= 2
+        assert len(big_instances) <= 5
+        assert len(small_instances) <= len(big_instances)
+
+    def test_compute_vlind_metrics_reproduces_lmms_eval(self):
+        """compute_vlind_metrics on the lmms-eval JSONL should reproduce published numbers.
+
+        Expected (from lmms-eval run on gemma-3-4b-it):
+            s_ck=0.7102, s_vp=0.8955, s_cb=0.7391, s_lp=0.6093, accuracy_lp=0.7405
+        """
+        import json
+        import os
+        from data_loaders import compute_vlind_metrics
+
+        jsonl_path = os.path.join(
+            os.path.dirname(__file__),
+            "../dataset_sanity_check/google__gemma-3-4b-it"
+            "/20260325_223037_samples_vlind_bench.jsonl",
+        )
+        if not os.path.exists(jsonl_path):
+            pytest.skip(f"lmms-eval JSONL not found at {jsonl_path}")
+
+        with open(jsonl_path) as f:
+            raw = [json.loads(line) for line in f]
+
+        # Convert lmms-eval records to compute_vlind_metrics format
+        records = []
+        for r in raw:
+            doc = r.get("doc", {})
+            pred = r.get("filtered_resps", [[""]])[0][0] if r.get("filtered_resps") else ""
+            target = "true" if doc.get("answer") == "true_statement" else "false"
+            from data_loaders.vlind_bench import is_match
+            records.append({
+                "instance_id": doc.get("id"),
+                "stage": doc.get("stage"),
+                "qid": doc.get("qid"),
+                "cf_img_idx": doc.get("cf_img_idx"),
+                "is_correct": is_match(pred, target),
+            })
+
+        metrics = compute_vlind_metrics(records)
+
+        assert abs(metrics["s_ck"] - 0.7102) < 0.002, f"s_ck mismatch: {metrics['s_ck']}"
+        assert abs(metrics["s_vp"] - 0.8955) < 0.002, f"s_vp mismatch: {metrics['s_vp']}"
+        assert abs(metrics["s_cb"] - 0.7391) < 0.002, f"s_cb mismatch: {metrics['s_cb']}"
+        assert abs(metrics["s_lp"] - 0.6093) < 0.002, f"s_lp mismatch: {metrics['s_lp']}"
+        assert abs(metrics["accuracy_lp"] - 0.7405) < 0.002, (
+            f"accuracy_lp mismatch: {metrics['accuracy_lp']}"
+        )

@@ -30,9 +30,12 @@ the HuggingFace ``datasets`` library.  Import as shown above.
 
 from .vab import is_match as vab_is_match
 from .vab import load_vab, load_vab_pairs
+from .vilp import compute_vilp_metrics
 from .vilp import is_match as vilp_is_match
-from .vilp import load_vilp
-from .vlind_bench import expand_vlind_bench_stages, load_vlind_bench
+from .vilp import load_vilp, load_vilp_expanded
+from .vilp import normalize_output as vilp_normalize_output
+from .vlind_bench import (compute_vlind_metrics, expand_vlind_bench_stages,
+                          load_vlind_bench, load_vlind_bench_lp)
 from .vlind_bench import is_match as vlind_is_match
 from .vqav2 import load_vqav2
 
@@ -66,12 +69,17 @@ __all__ = [
     "load_vab",
     "load_vab_pairs",
     "load_vilp",
+    "load_vilp_expanded",
     "load_vlind_bench",
+    "load_vlind_bench_lp",
     "expand_vlind_bench_stages",
     "load_vqav2",
     "vab_is_match",
     "vilp_is_match",
+    "vilp_normalize_output",
+    "compute_vilp_metrics",
     "vlind_is_match",
+    "compute_vlind_metrics",
     "get_is_match",
     "to_contrastive_sample",
 ]
