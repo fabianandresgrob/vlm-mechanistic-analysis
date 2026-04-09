@@ -492,7 +492,7 @@ def main() -> None:
     # Generate phase args
     parser.add_argument("--model", default="Qwen/Qwen3.5-27B",
                         help="HuggingFace model ID for question generation")
-    parser.add_argument("--revision", default="main",
+    parser.add_argument("--revision", default="b7ca741b86de18df552fd2cc952861e04621a4bd",
                         help="Model revision/commit hash (pin for reproducibility)")
     parser.add_argument("--tensor_parallel_size", type=int, default=1,
                         help="Number of GPUs for tensor parallelism (vLLM)")
