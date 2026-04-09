@@ -257,7 +257,7 @@ def generate_phase(args) -> None:
     llm = LLM(
         model=args.model,
         revision=args.revision,
-        dtype="bfloat16",
+        dtype=args.dtype,
         tensor_parallel_size=args.tensor_parallel_size,
         seed=42,
         trust_remote_code=True,
@@ -494,6 +494,9 @@ def main() -> None:
                         help="HuggingFace model ID for question generation")
     parser.add_argument("--revision", default="b7ca741b86de18df552fd2cc952861e04621a4bd",
                         help="Model revision/commit hash (pin for reproducibility)")
+    parser.add_argument("--dtype", default="bfloat16",
+                        choices=["bfloat16", "float16", "auto"],
+                        help="Model dtype. Use float16 for V100s (compute capability < 8.0)")
     parser.add_argument("--tensor_parallel_size", type=int, default=1,
                         help="Number of GPUs for tensor parallelism (vLLM)")
 
