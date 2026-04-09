@@ -166,6 +166,66 @@ class TestVABLoader:
         for s in samples:
             assert required <= s.keys(), f"Missing fields: {required - s.keys()}"
 
+    # --- resolution filtering ---
+
+    def _load_with_res(self, rows, resolution):
+        from data_loaders.vab import load_vab
+        ds = _FakeHFDataset(rows)
+        with patch("datasets.load_dataset", return_value=ds):
+            return load_vab(resolution=resolution)
+
+    def _pil_with_filename(self, filename: str) -> PILImage.Image:
+        img = _fake_pil()
+        img.filename = filename
+        return img
+
+    def _rows_with_resolutions(self):
+        """Three rows representing the same question at 384/768/1152 px."""
+        base = {"prompt": "Q?", "ground_truth": "yes", "expected_bias": "no",
+                "topic": "t", "sub_topic": "s"}
+        return [
+            {"ID": "r384",  "image": self._pil_with_filename("img_384.png"),  **base},
+            {"ID": "r768",  "image": self._pil_with_filename("img_768.png"),  **base},
+            {"ID": "r1152", "image": self._pil_with_filename("img_1152.png"), **base},
+        ]
+
+    def test_resolution_filter_keeps_matching(self):
+        rows = self._rows_with_resolutions()
+        samples = self._load_with_res(rows, resolution=1152)
+        assert len(samples) == 1
+        assert samples[0]["id"] == "r1152"
+
+    def test_resolution_filter_other_value(self):
+        rows = self._rows_with_resolutions()
+        samples = self._load_with_res(rows, resolution=384)
+        assert len(samples) == 1
+        assert samples[0]["id"] == "r384"
+
+    def test_resolution_filter_none_keeps_all(self):
+        rows = self._rows_with_resolutions()
+        samples = self._load_with_res(rows, resolution=None)
+        assert len(samples) == 3
+
+    def test_resolution_filter_via_image_path_field(self):
+        """Falls back to image_path field when PIL image has no .filename."""
+        base = {"prompt": "Q?", "ground_truth": "yes", "expected_bias": "no",
+                "topic": "t", "sub_topic": "s"}
+        rows = [
+            {"ID": "a", "image": _fake_pil(), "image_path": "img_1152.png", **base},
+            {"ID": "b", "image": _fake_pil(), "image_path": "img_384.png",  **base},
+        ]
+        samples = self._load_with_res(rows, resolution=1152)
+        assert len(samples) == 1
+        assert samples[0]["id"] == "a"
+
+    def test_resolution_filter_no_filename_passes_through(self):
+        """Rows with no detectable filename are kept (can't be filtered out)."""
+        base = {"prompt": "Q?", "ground_truth": "yes", "expected_bias": "no",
+                "topic": "t", "sub_topic": "s"}
+        rows = [{"ID": "x", "image": _fake_pil(), **base}]  # no filename, no image_path
+        samples = self._load_with_res(rows, resolution=1152)
+        assert len(samples) == 1
+
 
 # ---------------------------------------------------------------------------
 # ViLP
@@ -1208,14 +1268,14 @@ class TestVABDownload:
 
     def test_real_samples_schema(self):
         from data_loaders import load_vab
-        samples = load_vab(n_samples=2)
+        samples = load_vab(n_samples=2, resolution=None)
         assert len(samples) == 2
         for s in samples:
             _validate_base_schema(s, dataset="VAB-real")
 
     def test_real_answer_is_normalized(self):
         from data_loaders import load_vab
-        samples = load_vab(n_samples=5)
+        samples = load_vab(n_samples=5, resolution=None)
         for s in samples:
             # must be stripped, lowercase, no curly brackets
             assert s["answer"] == s["answer"].strip()
@@ -1224,7 +1284,7 @@ class TestVABDownload:
 
     def test_real_expected_bias_is_normalized(self):
         from data_loaders import load_vab
-        samples = load_vab(n_samples=5)
+        samples = load_vab(n_samples=5, resolution=None)
         for s in samples:
             assert s["expected_bias"] == s["expected_bias"].strip()
             assert s["expected_bias"] == s["expected_bias"].lower()
@@ -1232,7 +1292,7 @@ class TestVABDownload:
 
     def test_real_image_is_pil(self):
         from data_loaders import load_vab
-        samples = load_vab(n_samples=2)
+        samples = load_vab(n_samples=2, resolution=None)
         for s in samples:
             assert isinstance(s["image"], PILImage.Image)
             assert s["image"].size[0] > 0
@@ -1240,7 +1300,7 @@ class TestVABDownload:
     def test_real_id_field_present(self):
         """ID field must come from the 'ID' column (string), not fall back to row index."""
         from data_loaders import load_vab
-        samples = load_vab(n_samples=2)
+        samples = load_vab(n_samples=2, resolution=None)
         for s in samples:
             assert s["id"] is not None
             # VAB uses string IDs like "color_1", not plain integers
@@ -1478,7 +1538,7 @@ class TestVLindBenchLPDownload:
             assert "qid" in s, "qid missing"
             assert "cf_img_idx" in s, "cf_img_idx missing"
             assert s["stage"] == "lp"
-            assert s["qid"] in (1, 2)
+            assert s["qid"] in ("q1", "q2")
 
     def test_cf_image_is_real_jpeg(self, lp_samples):
         """LP loader uses CF images as primary image — must be real PIL images."""
@@ -1502,9 +1562,9 @@ class TestVLindBenchLPDownload:
     def test_q1_answer_true_q2_answer_false(self, lp_samples):
         """q1 asks about the true statement (answer='true'), q2 about the false one."""
         for s in lp_samples:
-            if s["qid"] == 1:
+            if s["qid"] == "q1":
                 assert s["answer"] == "true", f"q1 should have answer='true', got {s['answer']}"
-            elif s["qid"] == 2:
+            elif s["qid"] == "q2":
                 assert s["answer"] == "false", f"q2 should have answer='false', got {s['answer']}"
 
     def test_lp_prompt_instructs_follow_image(self, lp_samples):
