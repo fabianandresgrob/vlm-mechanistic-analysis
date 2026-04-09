@@ -412,6 +412,7 @@ def compute_vlind_metrics(results: list[dict]) -> dict:
         s_vp         — VP pass rate (all instances)
         s_cb         — CB pass rate (CK-passing instances; None if none pass)
         s_lp         — LP pass rate macro (CK+VP+CB-passing; None if none qualify)
+        accuracy_cb  — raw CB item accuracy (no conditioning)
         accuracy_lp  — raw LP item accuracy (no conditioning)
         n_instances  — total number of instances
         n_lp_qualifying — number of instances qualifying for s_lp
@@ -457,6 +458,11 @@ def compute_vlind_metrics(results: list[dict]) -> dict:
             if img_passes:
                 lp_instance_scores.append(sum(img_passes) / len(img_passes))
 
+    # Raw CB accuracy
+    cb_items = [r for r in results if r["stage"] == "cb"]
+    accuracy_cb = (sum(r["is_correct"] for r in cb_items) / len(cb_items)
+                   if cb_items else 0.0)
+
     # Raw LP accuracy
     lp_items = [r for r in results if r["stage"] == "lp"]
     accuracy_lp = (sum(r["is_correct"] for r in lp_items) / len(lp_items)
@@ -469,6 +475,7 @@ def compute_vlind_metrics(results: list[dict]) -> dict:
         "s_cb":            cb_num / cb_den if cb_den > 0 else None,
         "s_lp":            (sum(lp_instance_scores) / len(lp_instance_scores)
                             if lp_instance_scores else None),
+        "accuracy_cb":     accuracy_cb,
         "accuracy_lp":     accuracy_lp,
         "n_instances":     n,
         "n_lp_qualifying": len(lp_instance_scores),
