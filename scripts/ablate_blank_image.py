@@ -74,8 +74,8 @@ def _stratified_sample(raw: list[dict], n_per_topic: int) -> list[dict]:
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--n_per_topic", type=int, default=5,
-                   help="Samples per VAB topic (stratified)")
+    p.add_argument("--n_per_topic", type=int, default=None,
+                   help="Samples per VAB topic (stratified). Omit to use all 240 samples.")
     p.add_argument("--model", default="google/gemma-3-4b-it")
     p.add_argument("--device", default="cuda")
     p.add_argument("--max_new_tokens", type=int, default=5)
@@ -89,9 +89,9 @@ def main():
     model, processor = load_gemma3(args.model, device=args.device)
     is_match_fn = get_is_match("vlms_are_biased")
 
-    print(f"Loading VAB (stratified: {args.n_per_topic} per topic)…")
-    raw_all = load_vab()
-    raw = _stratified_sample(raw_all, args.n_per_topic)
+    print("Loading VAB (resolution=1152)…")
+    raw_all = load_vab()  # defaults to resolution=1152
+    raw = _stratified_sample(raw_all, args.n_per_topic) if args.n_per_topic else raw_all
     samples = [to_contrastive_sample(d) for d in raw]
     n_topics = len(set(s.get("topic", "unknown") for s in raw))
     print(f"Selected {len(samples)} samples across {n_topics} topics\n")
