@@ -37,7 +37,27 @@ from .vilp import normalize_output as vilp_normalize_output
 from .vlind_bench import (compute_vlind_metrics, expand_vlind_bench_stages,
                           load_vlind_bench, load_vlind_bench_lp)
 from .vlind_bench import is_match as vlind_is_match
+from .vlind_bench_oe import (compute_oe_metrics, load_vlind_bench_oe,
+                              score_sample as vlind_oe_score_sample)
 from .vqav2 import load_vqav2
+
+
+def _vlind_oe_is_match(pred: str, target: str) -> bool:
+    """Substring match after normalization for vlind-bench-oe.
+
+    Used by get_is_match() for the binary is_vision_dependent check.
+    For full correct/biased/other scoring use vlind_oe_score_sample.
+    """
+    import re
+
+    def _norm(t):
+        t = t.lower().strip()
+        t = re.sub(r"[^\w\s]", " ", t)
+        t = re.sub(r"\b(a|an|the)\b", " ", t)
+        return " ".join(t.split())
+
+    p, t = _norm(pred), _norm(target)
+    return bool(p and t and (t in p or p in t))
 
 
 def get_is_match(dataset: str):
@@ -48,6 +68,7 @@ def get_is_match(dataset: str):
         "vab_pairs": vab_is_match,
         "vilp": vilp_is_match,
         "vlind": vlind_is_match,
+        "vlind_oe": _vlind_oe_is_match,
         "vqav2": lambda p, t: p.strip().lower() == t.strip().lower(),
     }.get(dataset, lambda p, t: p.strip().lower() == t.strip().lower())
 
@@ -73,6 +94,7 @@ __all__ = [
     "load_vlind_bench",
     "load_vlind_bench_lp",
     "expand_vlind_bench_stages",
+    "load_vlind_bench_oe",
     "load_vqav2",
     "vab_is_match",
     "vilp_is_match",
@@ -80,6 +102,8 @@ __all__ = [
     "compute_vilp_metrics",
     "vlind_is_match",
     "compute_vlind_metrics",
+    "vlind_oe_score_sample",
+    "compute_oe_metrics",
     "get_is_match",
     "to_contrastive_sample",
 ]

@@ -25,7 +25,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chain_of_embedding.models.gemma3 import load_gemma3
-from data_loaders import load_vqav2, load_vab, load_vilp, load_vlind_bench
+from data_loaders import load_vqav2, load_vab, load_vilp, load_vlind_bench, load_vlind_bench_oe
 from feature_search.sae_utils import load_sae, extract_answer_token_acts
 from feature_search.contrastive_search import separation_scores
 
@@ -45,7 +45,7 @@ def main():
     parser.add_argument("--l0_level", default="big",
                         choices=["small", "big"])
     parser.add_argument("--dataset", default="vqav2",
-                        choices=["vqav2", "vab", "vilp", "vlind"])
+                        choices=["vqav2", "vab", "vilp", "vlind", "vlind_oe"])
     parser.add_argument("--n_samples", type=int, default=None,
                         help="Samples to use (default: 5000 for vqav2, all for others)")
     parser.add_argument("--noise_threshold", type=float, default=0.02)
@@ -70,7 +70,7 @@ def main():
         model, processor = load_gemma3(args.model, device=args.device)
 
         n = args.n_samples if args.n_samples is not None else (5000 if args.dataset == "vqav2" else None)
-        loaders = {"vqav2": load_vqav2, "vab": load_vab, "vilp": load_vilp, "vlind": load_vlind_bench}
+        loaders = {"vqav2": load_vqav2, "vab": load_vab, "vilp": load_vilp, "vlind": load_vlind_bench, "vlind_oe": load_vlind_bench_oe}
         samples = loaders[args.dataset](n_samples=n)
         logger.info("Loaded %d samples from %s", len(samples), args.dataset)
 

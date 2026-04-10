@@ -31,7 +31,7 @@ import argparse, json, logging, os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chain_of_embedding.models.gemma3 import load_gemma3
-from data_loaders import load_vab, load_vilp_expanded, load_vlind_bench_lp, get_is_match
+from data_loaders import load_vab, load_vilp_expanded, load_vlind_bench_lp, load_vlind_bench_oe, get_is_match
 from feature_search.sae_utils import load_sae
 from feature_search.steering import get_steering_vector, get_combined_steering_vector, steered_generate
 
@@ -48,6 +48,8 @@ def load_dataset(dataset: str, n_samples: int,
         return load_vilp_expanded(n_samples=n_samples, mode=vilp_mode, images=vilp_images)
     elif dataset == "vlind":
         return load_vlind_bench_lp(n_samples=n_samples)
+    elif dataset == "vlind_oe":
+        return load_vlind_bench_oe(n_samples=n_samples)
     else:
         raise ValueError(f"Unknown dataset: {dataset!r}")
 
@@ -110,7 +112,7 @@ def main():
     parser.add_argument("--n_top_features", type=int, default=3)
     parser.add_argument("--alpha_sweep", default="0,100,200,500",
                         help="Comma-separated alpha values")
-    parser.add_argument("--dataset", default="vab", choices=["vab", "vilp", "vlind"])
+    parser.add_argument("--dataset", default="vab", choices=["vab", "vilp", "vlind", "vlind_oe"])
     parser.add_argument("--n_samples", type=int, default=None,
                         help="Samples to evaluate (default: all available)")
     parser.add_argument("--output_dir", default="results/steering/")

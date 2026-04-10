@@ -46,7 +46,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chain_of_embedding.models.gemma3 import load_gemma3
-from data_loaders import load_vab, load_vilp_expanded, load_vlind_bench, load_vlind_bench_lp, load_vqav2, get_is_match
+from data_loaders import load_vab, load_vilp_expanded, load_vlind_bench, load_vlind_bench_lp, load_vlind_bench_oe, load_vqav2, get_is_match
 from feature_search.steering import steering_hook, steered_generate
 from revis.vector_calculator import compute_revis_vector
 
@@ -70,8 +70,10 @@ def load_calibration_samples(dataset: str, n_samples: int,
         return load_vilp_expanded(n_samples=n_samples, mode=vilp_mode, images=vilp_images)
     elif dataset == "vlind":
         return load_vlind_bench(n_samples=n_samples)
+    elif dataset == "vlind_oe":
+        return load_vlind_bench_oe(n_samples=n_samples)
     else:
-        raise ValueError(f"Unknown dataset: {dataset!r}. Choose 'vab', 'vqav2', 'vilp', or 'vlind'.")
+        raise ValueError(f"Unknown dataset: {dataset!r}. Choose 'vab', 'vqav2', 'vilp', 'vlind', or 'vlind_oe'.")
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +117,8 @@ def stage_steer(args, model, processor, steering_vector: torch.Tensor):
     # VLind eval uses LP items with CF images; calibration (stage_extract) keeps factual images.
     if args.dataset == "vlind":
         samples = load_vlind_bench_lp(n_samples=args.n_samples)
+    elif args.dataset == "vlind_oe":
+        samples = load_vlind_bench_oe(n_samples=args.n_samples)
     else:
         samples = load_calibration_samples(args.dataset, args.n_samples,
                                             vilp_mode=args.vilp_mode, vilp_images=args.vilp_images)
@@ -215,7 +219,7 @@ def main():
     parser.add_argument("--mode", choices=["extract", "steer", "both"], default="both")
     parser.add_argument("--model", default="google/gemma-3-4b-it")
     parser.add_argument("--layer", type=int, required=True, help="Target LLM layer (0-based)")
-    parser.add_argument("--dataset", default="vab", choices=["vab", "vqav2", "vilp", "vlind"])
+    parser.add_argument("--dataset", default="vab", choices=["vab", "vqav2", "vilp", "vlind", "vlind_oe"])
     parser.add_argument("--n_calib", type=int, default=100, help="Calibration samples for vector extraction")
     parser.add_argument("--n_samples", type=int, default=240, help="Evaluation samples for steering")
     parser.add_argument("--alphas", default="-200,-100,-50,0,50,100,200",

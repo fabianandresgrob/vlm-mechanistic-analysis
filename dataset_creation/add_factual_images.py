@@ -31,7 +31,7 @@ def main():
     parser.add_argument("--hf_repo", default="fabiangrob/vlind-bench-oe")
     args = parser.parse_args()
 
-    from datasets import load_dataset
+    from datasets import Dataset, Features, Image, load_dataset
     from PIL import Image as PILImage
     from data_loaders.vlind_bench import _download_and_parse, _find_factual_path
 
@@ -66,16 +66,13 @@ def main():
 
     logger.info("%d factual images loaded, %d missing.", len(ds) - n_missing, n_missing)
 
-    # Add column and push
-    ds = ds.add_column("factual_image", factual_images)
-
-    # Cast the new column to Image feature so HF stores it compressed
-    from datasets import Features, Image, Sequence, Value
-    new_features = Features({
-        **{k: v for k, v in ds.features.items()},
-        "factual_image": Image(),
-    })
-    ds = ds.cast(new_features)
+    # Rebuild dataset from dict so PIL images are handled correctly by the Image() feature.
+    # add_column passes directly to PyArrow which can't infer the type from PIL objects.
+    from datasets import Dataset, Features, Image
+    cols = {col: ds[col] for col in ds.column_names}
+    cols["factual_image"] = factual_images
+    new_features = Features({**ds.features, "factual_image": Image()})
+    ds = Dataset.from_dict(cols, features=new_features)
 
     logger.info("Pushing updated dataset to %s …", args.hf_repo)
     ds.push_to_hub(args.hf_repo, split="train")

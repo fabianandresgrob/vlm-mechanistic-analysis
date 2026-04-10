@@ -39,7 +39,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chain_of_embedding.models.gemma3 import load_gemma3
 from data_loaders import (get_is_match, load_vab, load_vilp_expanded,
-                          load_vlind_bench_lp, load_vqav2, compute_vlind_metrics)
+                          load_vlind_bench_lp, load_vlind_bench_oe, load_vqav2,
+                          compute_vlind_metrics, compute_oe_metrics)
 from eva.eva_decoding import eva_decode_dataset
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -112,6 +113,16 @@ def run_alpha(model, processor, samples, dataset, target_layer, alpha,
         ) / n,
     }
 
+    if dataset == "vlind_oe":
+        van_oe = [{"score": "correct" if r.get("is_correct_vanilla") else "other",
+                   "concept": r.get("concept", "")} for r in results]
+        eva_oe = [{"score": "correct" if r.get("is_correct_eva") else "other",
+                   "concept": r.get("concept", "")} for r in results]
+        summary["vlind_oe_metric"] = "accuracy"
+        summary["vanilla_oe_accuracy"] = compute_oe_metrics(van_oe)["accuracy"]
+        summary["eva_oe_accuracy"]     = compute_oe_metrics(eva_oe)["accuracy"]
+        summary["oe_accuracy_delta"]   = summary["eva_oe_accuracy"] - summary["vanilla_oe_accuracy"]
+
     if dataset == "vlind":
         # Compute accuracy_lp separately for vanilla and EVA conditions.
         # s_lp (conditional on CK+VP+CB) requires a full 4-stage eval run;
@@ -155,7 +166,7 @@ def main():
     parser = argparse.ArgumentParser(description="Exp 2.2: EVA Corrected Decoding")
     parser.add_argument("--model", default="google/gemma-3-4b-it")
     parser.add_argument("--dataset", default="vlms_are_biased",
-                        choices=["vqav2", "vlms_are_biased", "vilp", "vlind"])
+                        choices=["vqav2", "vlms_are_biased", "vilp", "vlind", "vlind_oe"])
     parser.add_argument("--vab_dataset_id", default="anvo25/vlms-are-biased")
     parser.add_argument("--vab_split", default="main")
     parser.add_argument("--n_samples", type=int, default=None)
@@ -194,6 +205,8 @@ def main():
         samples = load_vilp_expanded(n_samples=n, mode=args.vilp_mode, images=args.vilp_images)
     elif args.dataset == "vlind":
         samples = load_vlind_bench_lp(n_samples=n)
+    elif args.dataset == "vlind_oe":
+        samples = load_vlind_bench_oe(n_samples=n)
     logger.info("Loaded %d samples.", len(samples))
 
     logger.info("Loading %s…", args.model)
