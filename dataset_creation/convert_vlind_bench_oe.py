@@ -25,6 +25,7 @@ The dataset schema (one row = one prompt-ready datapoint):
     true_statement   str     — original true_statement field (for debugging)
     false_statement  str     — original false_statement field (for debugging)
     cf_image         Image   — the counterfactual PIL image
+    factual_image    Image   — the original real-world image (for 3-condition analysis)
 
 Generation is deterministic: temperature=0, fixed seed, pinned model revision.
 Metadata (model, revision, date, instructions) is saved to output_dir/metadata.json.
@@ -411,7 +412,7 @@ def build_phase(args) -> None:
         logger.error("datasets is required for the build phase. Install with: pip install datasets")
         sys.exit(1)
 
-    from data_loaders.vlind_bench import _download_and_parse, _find_cf_paths
+    from data_loaders.vlind_bench import _download_and_parse, _find_cf_paths, _find_factual_path
     from PIL import Image as PILImage
 
     output_dir = Path(args.output_dir)
@@ -425,7 +426,7 @@ def build_phase(args) -> None:
     by_id = {r["instance_id"]: r for r in generated}
     logger.info("Loaded %d generated instances.", len(by_id))
 
-    _, _, cf_dir = _download_and_parse()
+    _, factual_dir, cf_dir = _download_and_parse()
 
     rows: list[dict] = []
     n_missing = 0
@@ -434,6 +435,9 @@ def build_phase(args) -> None:
         concept = record["concept"]
         context_id = record["context_id"]
         cf_paths = _find_cf_paths(cf_dir, concept, context_id)
+
+        factual_path = _find_factual_path(factual_dir, concept, context_id)
+        factual_img = PILImage.open(factual_path).convert("RGB") if factual_path and Path(factual_path).exists() else None
 
         for cf_idx in record["good_img_ids"]:
             path = cf_paths[cf_idx] if cf_idx < len(cf_paths) else ""
@@ -456,6 +460,7 @@ def build_phase(args) -> None:
                 "true_statement": record["true_statement"],
                 "false_statement": record["false_statement"],
                 "cf_image": img,
+                "factual_image": factual_img,
             })
 
     logger.info("Built %d rows (%d missing images skipped).", len(rows), n_missing)
@@ -471,6 +476,7 @@ def build_phase(args) -> None:
         "true_statement":   Value("string"),
         "false_statement":  Value("string"),
         "cf_image":         Image(),
+        "factual_image":    Image(),
     })
 
     # Build column-oriented dict for Dataset.from_dict
