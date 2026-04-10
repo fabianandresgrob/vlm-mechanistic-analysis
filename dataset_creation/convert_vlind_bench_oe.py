@@ -218,42 +218,10 @@ def _validate_output(parsed: dict) -> bool:
 # Phase 1: Generate
 # ---------------------------------------------------------------------------
 
-def generate_phase(args) -> None:
-    try:
-        from vllm import LLM, SamplingParams
-    except ImportError:
-        logger.error("vLLM is required for the generate phase. Install with: pip install vllm")
-        sys.exit(1)
+def _generate_vllm(args, meta: list[dict]) -> list[str]:
+    """Generate text for all instances using vLLM (batched)."""
+    from vllm import LLM, SamplingParams
 
-    from data_loaders.vlind_bench import _download_and_parse
-
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    generated_path = output_dir / "generated.jsonl"
-    failed_path = output_dir / "failed_instances.json"
-
-    # Load already-generated instance IDs for resumability
-    done_ids: set[int] = set()
-    if generated_path.exists():
-        with open(generated_path) as f:
-            for line in f:
-                r = json.loads(line)
-                done_ids.add(r["instance_id"])
-        logger.info("Resuming: %d instances already generated.", len(done_ids))
-
-    raw_data, _, _ = _download_and_parse()
-    logger.info("Loaded %d VLind-Bench instances.", len(raw_data))
-
-    pending = [
-        (idx, entry) for idx, entry in enumerate(raw_data)
-        if idx not in done_ids
-    ]
-    logger.info("%d instances to generate.", len(pending))
-    if not pending:
-        logger.info("Nothing to do.")
-        return
-
-    logger.info("Loading model %s (revision=%s)…", args.model, args.revision)
     llm = LLM(
         model=args.model,
         revision=args.revision,
@@ -263,26 +231,116 @@ def generate_phase(args) -> None:
         trust_remote_code=True,
     )
     tokenizer = llm.get_tokenizer()
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=512, seed=42)
 
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        max_tokens=300,
-        seed=42,
+    prompt_texts = [
+        tokenizer.apply_chat_template(
+            m["_messages"], tokenize=False, add_generation_prompt=True,
+            enable_thinking=False,  # disable Qwen3 chain-of-thought
+        )
+        for m in meta
+    ]
+    outputs = llm.generate(prompt_texts, sampling_params)
+    return [o.outputs[0].text.strip() for o in outputs]
+
+
+def _generate_transformers(args, meta: list[dict]) -> list[str]:
+    """Generate text for all instances using transformers (sequential, works on MIG)."""
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
+
+    set_seed(42)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model, revision=args.revision, trust_remote_code=True
     )
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model,
+        revision=args.revision,
+        torch_dtype=torch.float16 if args.dtype == "float16" else torch.bfloat16,
+        device_map="auto",
+        trust_remote_code=True,
+    )
+    model.eval()
 
-    # Build all prompts upfront for batched generation
-    prompt_texts: list[str] = []
-    meta: list[dict] = []  # per-instance metadata to save alongside generated fields
+    outputs = []
+    for i, m in enumerate(meta):
+        if i % 50 == 0:
+            logger.info("Generating %d/%d…", i, len(meta))
+        prompt = tokenizer.apply_chat_template(
+            m["_messages"], tokenize=False, add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            out = model.generate(
+                **inputs,
+                max_new_tokens=300,
+                do_sample=False,
+                temperature=1.0,  # ignored with do_sample=False
+            )
+        new_tokens = out[0][inputs["input_ids"].shape[1]:]
+        outputs.append(tokenizer.decode(new_tokens, skip_special_tokens=True).strip())
+
+    return outputs
+
+
+def _retry_single(args, m: dict, first_output: str, backend: str) -> str:
+    """Retry generation for one instance with a stricter prompt."""
+    retry_messages = m["_messages"] + [
+        {"role": "assistant", "content": first_output},
+        {"role": "user", "content": (
+            "Your response was not valid JSON. "
+            "Output ONLY the JSON object with keys "
+            "\"question\", \"expected_answers\", \"biased_answers\". "
+            "No markdown, no explanation."
+        )},
+    ]
+    retry_meta = [{**m, "_messages": retry_messages}]
+    if backend == "vllm":
+        # Re-use already-loaded engine isn't possible here; fall back to transformers for retry
+        results = _generate_transformers(args, retry_meta)
+    else:
+        results = _generate_transformers(args, retry_meta)
+    return results[0]
+
+
+def generate_phase(args) -> None:
+    from data_loaders.vlind_bench import _download_and_parse
+
+    if args.backend == "vllm":
+        try:
+            from vllm import LLM  # noqa: F401
+        except ImportError:
+            logger.error("vLLM not installed. Use --backend transformers or install vllm.")
+            sys.exit(1)
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    generated_path = output_dir / "generated.jsonl"
+    failed_path = output_dir / "failed_instances.json"
+
+    # Resume: skip already-generated instances
+    done_ids: set[int] = set()
+    if generated_path.exists():
+        with open(generated_path) as f:
+            for line in f:
+                done_ids.add(json.loads(line)["instance_id"])
+        logger.info("Resuming: %d instances already generated.", len(done_ids))
+
+    raw_data, _, _ = _download_and_parse()
+    logger.info("Loaded %d VLind-Bench instances.", len(raw_data))
+
+    pending = [(idx, e) for idx, e in enumerate(raw_data) if idx not in done_ids]
+    logger.info("%d instances to generate (backend=%s).", len(pending), args.backend)
+    if not pending:
+        logger.info("Nothing to do.")
+        return
+
+    meta: list[dict] = []
     for idx, entry in pending:
         concept = entry["concept"]
         true_stmt = entry["true_statement"]
         false_stmt = entry["false_statement"]
-        messages = build_messages(concept, true_stmt, false_stmt)
-        prompt_text = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        prompt_texts.append(prompt_text)
-
         label_votes = entry.get("aggregated_human_label_good_images", {})
         good_img_ids = sorted(
             int(k) for k, v in label_votes.items()
@@ -295,43 +353,26 @@ def generate_phase(args) -> None:
             "true_statement": true_stmt,
             "false_statement": false_stmt,
             "good_img_ids": good_img_ids,
+            "_messages": build_messages(concept, true_stmt, false_stmt),
         })
 
-    logger.info("Running batched generation for %d instances…", len(prompt_texts))
-    outputs = llm.generate(prompt_texts, sampling_params)
+    logger.info("Loading model %s (revision=%s)…", args.model, args.revision)
+    if args.backend == "vllm":
+        raw_outputs = _generate_vllm(args, meta)
+    else:
+        raw_outputs = _generate_transformers(args, meta)
 
     failed: list[int] = []
     with open(generated_path, "a") as out_f:
-        for m, output in zip(meta, outputs):
-            text = output.outputs[0].text.strip()
+        for m, text in zip(meta, raw_outputs):
             parsed = _extract_json(text)
 
-            # Retry with explicit stricter prompt if parsing failed
             if parsed is None or not _validate_output(parsed):
                 logger.warning(
                     "Parse failed for instance %d (concept=%s). Retrying…",
                     m["instance_id"], m["concept"],
                 )
-                retry_messages = build_messages(
-                    m["concept"], m["true_statement"], m["false_statement"]
-                )
-                retry_messages.append({
-                    "role": "assistant", "content": text,
-                })
-                retry_messages.append({
-                    "role": "user",
-                    "content": (
-                        "Your response was not valid JSON. "
-                        "Output ONLY the JSON object with keys "
-                        "\"question\", \"expected_answers\", \"biased_answers\". "
-                        "No markdown, no explanation."
-                    ),
-                })
-                retry_prompt = tokenizer.apply_chat_template(
-                    retry_messages, tokenize=False, add_generation_prompt=True
-                )
-                retry_output = llm.generate([retry_prompt], sampling_params)
-                retry_text = retry_output[0].outputs[0].text.strip()
+                retry_text = _retry_single(args, m, text, args.backend)
                 parsed = _extract_json(retry_text)
 
             if parsed is None or not _validate_output(parsed):
@@ -342,23 +383,21 @@ def generate_phase(args) -> None:
                 failed.append(m["instance_id"])
                 continue
 
-            record = {**m, **parsed, "generation_status": "ok",
-                      "generation_model": args.model, "generation_revision": args.revision}
+            # Strip internal key before saving
+            record = {k: v for k, v in m.items() if not k.startswith("_")}
+            record.update(parsed)
+            record["generation_status"] = "ok"
+            record["generation_model"] = args.model
+            record["generation_revision"] = args.revision
             out_f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     if failed:
-        existing_failed: list[int] = []
-        if failed_path.exists():
-            with open(failed_path) as f:
-                existing_failed = json.load(f)
-        with open(failed_path, "w") as f:
-            json.dump(sorted(set(existing_failed + failed)), f, indent=2)
-        logger.warning("%d instances failed and were skipped. See %s.", len(failed), failed_path)
+        existing: list[int] = json.loads(failed_path.read_text()) if failed_path.exists() else []
+        failed_path.write_text(json.dumps(sorted(set(existing + failed)), indent=2))
+        logger.warning("%d instances failed. See %s.", len(failed), failed_path)
 
-    logger.info(
-        "Generation complete. %d succeeded, %d failed.",
-        len(pending) - len(failed), len(failed),
-    )
+    logger.info("Generation complete. %d succeeded, %d failed.",
+                len(pending) - len(failed), len(failed))
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +536,8 @@ def main() -> None:
     parser.add_argument("--dtype", default="bfloat16",
                         choices=["bfloat16", "float16", "auto"],
                         help="Model dtype. Use float16 for V100s (compute capability < 8.0)")
+    parser.add_argument("--backend", default="vllm", choices=["vllm", "transformers"],
+                        help="Inference backend. Use transformers on MIG instances or when vLLM is unavailable")
     parser.add_argument("--tensor_parallel_size", type=int, default=1,
                         help="Number of GPUs for tensor parallelism (vLLM)")
 
